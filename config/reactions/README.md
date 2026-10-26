@@ -25,3 +25,4 @@ The curation record is retained in `tools/curate_real_reactions.py`; it download
 - Ordinary messages only receive an occasional contextual reaction when `REACTION_PROBABILITY` permits it and the text has a clear matching emotion. Explanations and serious distress do not get random celebratory media.
 - Automatic reactions use a per-channel cooldown and recent-path avoidance. Explicit requests bypass the automatic cooldown but still use safe validation.
 - Uploads use `discord.File(...)`; failures are logged by exception class and do not expose private conversation content.
+- Strong contextual moods such as laughter, surprise, excitement, and achievements use `REACTION_HIGHLIGHT_PROBABILITY` (default `0.30`); ordinary eligible moods use `REACTION_PROBABILITY` (default `0.12`). Budget mode, cooldowns, recent-path avoidance, and duplicate-message protection still apply.

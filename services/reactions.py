@@ -15,15 +15,15 @@ MAX_REACTION_DIMENSION = 4096
 ALLOWED_SUFFIXES = frozenset({".gif", ".png", ".jpg", ".jpeg", ".webp"})
 MANIFEST_FILENAME = "manifest.json"
 
-ACTION_WORDS = r"\b(send|show|give|find|want|need|drop|post|share)\b"
+ACTION_WORDS = r"\b(send|show|give|find|want|need|drop|post|share|use|express|react|respond|reply)\b"
 MEDIA_WORDS = r"\b(gif|reaction|meme|image|picture|photo|pic)\b"
 
 # These rules are intentionally local and conservative. They are used both for
 # explicit media requests and for occasional contextual reactions after a text
 # reply; neither path needs another model call.
 CATEGORY_PATTERNS: tuple[tuple[str, str], ...] = (
-    ("shock", r"\b(shock(?:ed)?|surpris(?:e|ed)|wtf|no way|seriously|you did what)\b"),
-    ("excited", r"\b(excited|hype|can't wait|cannot wait|let's go|lets go)\b"),
+    ("shock", r"\b(shock(?:ed)?|surpris(?:e|ed|ing)|unexpected|wtf|no way|seriously|you did what)\b"),
+    ("excited", r"\b(excited|exciting|excitement|hype|can't wait|cannot wait|let's go|lets go)\b"),
     ("happy", r"\b(happy|glad|yay|awesome|great|congrats?|won|joy|thank(?:s| you))\b"),
     ("laughing", r"\b(laugh|laughing|lol|lmao|hilarious|funny|joke)\b"),
     ("confused", r"\b(confus(?:e|ed|ing)|huh|what do you mean|weird|unclear)\b"),
@@ -79,6 +79,31 @@ CATEGORY_PATTERNS: tuple[tuple[str, str], ...] = (
     ("gaming_facepalm", r"\b(gaming facepalm|throwing the game|critical fail)\b"),
 )
 
+AUTOMATIC_SUPPRESS_PATTERN = re.compile(
+    r"(?i)(?:\b(?:suicide|suicidal|self[- ]?harm|kill myself|want to die|overdose|abuse|assault|rape|doxx|"
+    r"password|api[_ -]?key|token|secret|medical|diagnos(?:e|is)|emergency|funeral|death|dead|grief|trauma|"
+    r"depressed|ping everyone|mass ping)\b|@everyone|@here)"
+)
+
+AUTOMATIC_SARCASM_PATTERN = re.compile(
+    r"(?i)(?:\b(?:sarcasm|sarcastic|yeah right|sure buddy|as if|just kidding|not actually)\b|/s\b)"
+)
+
+SERIOUS_CONTEXT_PATTERN = re.compile(
+    r"(?i)(?:"
+    r"\b(?:having|had|it's been|it has been)\s+(?:a\s+)?(?:genuinely\s+|really\s+|such a\s+)?(?:rough|hard|difficult|terrible|awful|horrible)\s+(?:day|time)\b|"
+    r"\b(?:don't|do not|doesn't|does not)\s+(?:really\s+)?feel\s+like\s+jok(?:e|ing)\b|"
+    r"\b(?:not|no)\s+in\s+the\s+mood\s+to\s+jok(?:e|ing)\b|"
+    r"\b(?:please|just)\s+don't\s+joke\b|"
+    r"\b(?:not doing well|not okay|not ok|can't cope|cannot cope|feel hopeless|feeling hopeless|overwhelmed|panic attack|grieving|bereaved|mourning|lost someone|someone died|funeral)\b|"
+    r"\b(?:suicide|suicidal|self[- ]?harm|kill myself|want to die|overdose|abuse|assault|rape|doxx|medical emergency|diagnos(?:e|is)|trauma|depressed)\b"
+    r")"
+)
+
+AUTOMATIC_LOW_SIGNAL_CATEGORIES = frozenset({
+    "greeting", "goodbye", "wave", "nod", "listening", "attention", "thinking", "curious",
+    "fair_enough", "wait_a_second", "good_luck", "you_got_this", "thankful",
+})
 
 @dataclass(frozen=True, slots=True)
 class ReactionAsset:
@@ -327,6 +352,48 @@ class ReactionLibrary:
     def infer_category(text: str) -> str | None:
         lowered = text.lower()
         return next((category for category, pattern in CATEGORY_PATTERNS if re.search(pattern, lowered)), None)
+
+    @staticmethod
+    def automatic_category(text: str, answer: str = "") -> str | None:
+        """Return a conservative local mood for an unsolicited reaction.
+
+        This deliberately suppresses sensitive, private, security-related,
+        and mention-manipulation content. Explicit media requests use the
+        normal request path and are not silently converted into automatic
+        reactions.
+        """
+        combined = f"{text}\n{answer}"
+        if ReactionLibrary.is_serious_context(text, answer) or AUTOMATIC_SUPPRESS_PATTERN.search(combined) or AUTOMATIC_SARCASM_PATTERN.search(text):
+            return None
+        # The user's message must provide the mood signal. Letting a generic
+        # assistant phrase such as "great question" trigger media would make
+        # ordinary conversations look excited and cause false-positive GIFs.
+        category = ReactionLibrary.infer_category(text)
+        if category in AUTOMATIC_LOW_SIGNAL_CATEGORIES:
+            return None
+        if category and ReactionLibrary._category_match_is_negated(combined, category):
+            return None
+        return category
+
+    @staticmethod
+    def is_serious_context(text: str, context: str = "") -> bool:
+        """Return true for explicit distress/sensitive disclosures or no-joke requests.
+
+        This intentionally targets multi-word/contextual signals rather than
+        suppressing every negative adjective such as ``frustrated``.
+        """
+        return bool(SERIOUS_CONTEXT_PATTERN.search(f"{text}\n{context}"))
+
+    @staticmethod
+    def _category_match_is_negated(text: str, category: str) -> bool:
+        pattern = next((pattern for name, pattern in CATEGORY_PATTERNS if name == category), None)
+        if pattern is None:
+            return False
+        for match in re.finditer(pattern, text, re.IGNORECASE):
+            prefix = text[max(0, match.start() - 24):match.start()]
+            if re.search(r"(?i)\b(?:not|never|no|isn't|wasn't|aren't|don't|didn't)\s*$", prefix):
+                return True
+        return False
 
     @classmethod
     def request_category(cls, text: str) -> str | None:

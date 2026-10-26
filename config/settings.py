@@ -62,6 +62,7 @@ class Settings:
     inactivity_template: str = "Where did you vanish to, {owner}? Mimi was about to file a tiny missing-person report."
     reaction_library_dir: Path = Path("config/reactions")
     reaction_probability: float = 0.12
+    reaction_highlight_probability: float = 0.30
     reaction_cooldown_seconds: float = 45.0
     reaction_repeat_window: int = 6
     reaction_max_file_bytes: int = 8 * 1024 * 1024
@@ -111,6 +112,7 @@ class Settings:
             inactivity_template=os.getenv("INACTIVITY_TEMPLATE", "Where did you vanish to, {owner}? Mimi was about to file a tiny missing-person report."),
             reaction_library_dir=base_dir / os.getenv("REACTION_LIBRARY_DIR", "config/reactions"),
             reaction_probability=min(1.0, max(0.0, float(os.getenv("REACTION_PROBABILITY", "0.12")))),
+            reaction_highlight_probability=min(1.0, max(0.0, float(os.getenv("REACTION_HIGHLIGHT_PROBABILITY", "0.30")))),
             reaction_cooldown_seconds=max(0.0, float(os.getenv("REACTION_COOLDOWN_SECONDS", "45"))),
             reaction_repeat_window=min(50, max(1, int(os.getenv("REACTION_REPEAT_WINDOW", "6")))),
             reaction_max_file_bytes=min(8 * 1024 * 1024, max(1024, int(os.getenv("REACTION_MAX_FILE_BYTES", str(8 * 1024 * 1024))))),

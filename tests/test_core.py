@@ -138,8 +138,10 @@ def test_local_reaction_is_selected_and_sent(tmp_path: Path):
         def __init__(self):
             self.sent_file = None
 
-        async def send(self, *, file):
+        async def send(self, *, file, allowed_mentions):
             self.sent_file = file
+            assert allowed_mentions.everyone is False
+            assert allowed_mentions.roles is False
 
     channel = Channel()
     assert asyncio.run(bot._send_local_reaction(channel, selected)) is True
@@ -163,7 +165,7 @@ def test_reaction_request_and_missing_or_invalid_assets(tmp_path: Path):
     assert bot._select_local_reaction("send me a shocked anime GIF", requested_category="shock", force=True) is None
 
     class BrokenChannel:
-        async def send(self, *, file):
+        async def send(self, *, file, allowed_mentions):
             raise OSError("missing file")
 
     valid = settings.reaction_library_dir / "shock.gif"
