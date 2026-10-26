@@ -1,0 +1,10 @@
+.env
+data/
+*.sqlite3
+*.sqlite3-*
+logs/
+__pycache__/
+.pytest_cache/
+.venv/
+_legacy_*/
+.git/

@@ -1,0 +1,129 @@
+from __future__ import annotations
+
+import sqlite3
+import threading
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+class Store:
+    def __init__(self, path: Path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.conn = sqlite3.connect(path, check_same_thread=False)
+        self.conn.row_factory = sqlite3.Row
+        self.lock = threading.RLock()
+        with self.lock:
+            self.conn.executescript("""
+            PRAGMA journal_mode=WAL;
+            CREATE TABLE IF NOT EXISTS memories (
+              id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, guild_id INTEGER NOT NULL,
+              fact TEXT NOT NULL, fingerprint TEXT NOT NULL, created_at TEXT NOT NULL,
+              last_used_at TEXT NOT NULL, UNIQUE(user_id, guild_id, fingerprint)
+            );
+            CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(user_id, guild_id);
+            CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS summaries (
+              guild_id INTEGER NOT NULL, channel_id INTEGER NOT NULL, user_id INTEGER NOT NULL,
+              summary TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(guild_id, channel_id, user_id)
+            );
+            CREATE TABLE IF NOT EXISTS daily_usage (
+              date_key TEXT PRIMARY KEY, input_tokens INTEGER NOT NULL DEFAULT 0,
+              output_tokens INTEGER NOT NULL DEFAULT 0, estimated_tokens INTEGER NOT NULL DEFAULT 0,
+              web_searches INTEGER NOT NULL DEFAULT 0, vision_requests INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS owner_activity (
+              guild_id INTEGER PRIMARY KEY, owner_id INTEGER NOT NULL,
+              last_seen_at TEXT NOT NULL, ping_sent_at TEXT, last_ping_at TEXT
+            );
+            """)
+            try:
+                self.conn.execute("ALTER TABLE owner_activity ADD COLUMN last_ping_at TEXT")
+            except sqlite3.OperationalError:
+                pass
+
+    def close(self) -> None:
+        with self.lock:
+            self.conn.close()
+
+    def add_memory(self, user_id: int, guild_id: int, fact: str) -> None:
+        fingerprint = " ".join(fact.lower().split())[:500]
+        with self.lock:
+            self.conn.execute("""INSERT INTO memories(user_id,guild_id,fact,fingerprint,created_at,last_used_at)
+                VALUES(?,?,?,?,?,?) ON CONFLICT(user_id,guild_id,fingerprint) DO UPDATE SET fact=excluded.fact,last_used_at=excluded.last_used_at""",
+                (user_id, guild_id, fact[:500], fingerprint, now_iso(), now_iso()))
+            self.conn.commit()
+
+    def list_memories(self, user_id: int, guild_id: int, expiry_days: int, protected_user_ids: frozenset[int] = frozenset()) -> list[sqlite3.Row]:
+        with self.lock:
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=expiry_days)).isoformat()
+            if protected_user_ids:
+                marks = ",".join("?" for _ in protected_user_ids)
+                self.conn.execute(f"DELETE FROM memories WHERE last_used_at < ? AND user_id NOT IN ({marks})", (cutoff, *protected_user_ids))
+            else:
+                self.conn.execute("DELETE FROM memories WHERE last_used_at < ?", (cutoff,))
+            self.conn.commit()
+            return list(self.conn.execute("SELECT * FROM memories WHERE user_id=? AND guild_id=? ORDER BY id", (user_id, guild_id)))
+
+    def touch(self, ids: list[int]) -> None:
+        if not ids: return
+        with self.lock:
+            self.conn.executemany("UPDATE memories SET last_used_at=? WHERE id=?", [(now_iso(), i) for i in ids])
+            self.conn.commit()
+
+    def delete_memory(self, user_id: int, guild_id: int, memory_id: int) -> bool:
+        with self.lock:
+            cur = self.conn.execute("DELETE FROM memories WHERE id=? AND user_id=? AND guild_id=?", (memory_id, user_id, guild_id))
+            self.conn.commit()
+            return cur.rowcount > 0
+
+    def delete_all(self, user_id: int, guild_id: int) -> int:
+        with self.lock:
+            cur = self.conn.execute("DELETE FROM memories WHERE user_id=? AND guild_id=?", (user_id, guild_id))
+            self.conn.commit()
+            return cur.rowcount
+
+    def stats(self) -> tuple[int, int]:
+        with self.lock:
+            return tuple(self.conn.execute("SELECT COUNT(*), COUNT(DISTINCT user_id) FROM memories").fetchone())
+
+    def usage(self, date_key: str) -> dict[str, int]:
+        with self.lock:
+            row = self.conn.execute("SELECT * FROM daily_usage WHERE date_key=?", (date_key,)).fetchone()
+            if row is None:
+                return {"input_tokens": 0, "output_tokens": 0, "estimated_tokens": 0, "web_searches": 0, "vision_requests": 0}
+            return dict(row)
+
+    def add_usage(self, date_key: str, input_tokens: int, output_tokens: int, estimated: bool,
+                  web_search: bool = False, vision: bool = False) -> None:
+        with self.lock:
+            self.conn.execute("""INSERT INTO daily_usage(date_key,input_tokens,output_tokens,estimated_tokens,web_searches,vision_requests)
+                VALUES(?,?,?,?,?,?) ON CONFLICT(date_key) DO UPDATE SET
+                input_tokens=input_tokens+excluded.input_tokens,
+                output_tokens=output_tokens+excluded.output_tokens,
+                estimated_tokens=estimated_tokens+excluded.estimated_tokens,
+                web_searches=web_searches+excluded.web_searches,
+                vision_requests=vision_requests+excluded.vision_requests""",
+                (date_key, input_tokens, output_tokens, input_tokens + output_tokens if estimated else 0,
+                 1 if web_search else 0, 1 if vision else 0))
+            self.conn.commit()
+
+    def record_owner_activity(self, guild_id: int, owner_id: int, at: str) -> None:
+        with self.lock:
+            self.conn.execute("""INSERT INTO owner_activity(guild_id,owner_id,last_seen_at,ping_sent_at)
+                VALUES(?,?,?,NULL) ON CONFLICT(guild_id) DO UPDATE SET
+                owner_id=excluded.owner_id, last_seen_at=excluded.last_seen_at, ping_sent_at=NULL""",
+                (guild_id, owner_id, at))
+            self.conn.commit()
+
+    def owner_activity(self, guild_id: int) -> sqlite3.Row | None:
+        with self.lock:
+            return self.conn.execute("SELECT * FROM owner_activity WHERE guild_id=?", (guild_id,)).fetchone()
+
+    def mark_owner_ping(self, guild_id: int, at: str) -> None:
+        with self.lock:
+            self.conn.execute("UPDATE owner_activity SET ping_sent_at=?, last_ping_at=? WHERE guild_id=?", (at, at, guild_id))
+            self.conn.commit()
