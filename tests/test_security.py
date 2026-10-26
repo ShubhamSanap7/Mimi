@@ -125,3 +125,61 @@ def test_provider_error_reply_uses_deny_all_policy(tmp_path: Path):
         await bot.close()
 
     asyncio.run(run())
+
+
+def test_first_contact_cannot_claim_prior_dm_or_conversation(tmp_path: Path):
+    settings = Settings.load(PROJECT_ROOT)
+    settings.xkiro_api_key = "test-key"
+    settings.database_path = tmp_path / "data.sqlite3"
+    bot = MimiBot(settings)
+    captured = []
+
+    async def hallucinating_complete(messages, **_kwargs):
+        captured.append(messages)
+        return "I told you to check your DMs earlier.", "test", {}, {"input_tokens": 1, "output_tokens": 1, "exact": True}
+
+    async def run():
+        bot.provider.complete = hallucinating_complete
+        message = _Message()
+        message.content = "Oh gamerz wife back"
+        await bot._generate_reply(message, first_contact=True)
+        system = captured[0][0]["content"]
+        assert "FIRST CONTACT" in system
+        assert "Do not imply previous conversations" in system
+        assert message.replies[0][0] == "I haven’t sent you a DM, so there’s nothing to check there."
+        await bot.close()
+
+    asyncio.run(run())
+
+
+def test_returning_user_uses_actual_history_but_missing_history_stays_uncertain(tmp_path: Path):
+    settings = Settings.load(PROJECT_ROOT)
+    settings.xkiro_api_key = "test-key"
+    settings.database_path = tmp_path / "data.sqlite3"
+    bot = MimiBot(settings)
+    captured = []
+
+    async def normal_complete(messages, **_kwargs):
+        captured.append(messages)
+        return "Okay, I remember only what is shown here.", "test", {}, {"input_tokens": 1, "output_tokens": 1, "exact": True}
+
+    async def run():
+        bot.provider.complete = normal_complete
+        bot.store.record_interaction(701, 702, "2026-10-26T00:00:00+00:00")
+        bot.histories[(702, 700, 701)].append({"role": "user", "content": "We discussed tournament practice."})
+        message = _Message()
+        message.content = "What were we discussing?"
+        await bot._generate_reply(message, first_contact=False)
+        assert "RETURNING STATUS" in captured[-1][0]["content"]
+        assert "tournament practice" in str(captured[-1])
+
+        captured.clear()
+        message2 = _Message()
+        message2.content = "Do you remember something else?"
+        bot.histories[(702, 700, 701)].clear()
+        await bot._generate_reply(message2, first_contact=False)
+        assert "RETURNING STATUS" in captured[-1][0]["content"]
+        assert "specific past events are unknown" in captured[-1][0]["content"]
+        await bot.close()
+
+    asyncio.run(run())

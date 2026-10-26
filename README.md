@@ -41,6 +41,8 @@ python main.py
 
 The bot responds to mentions, replies to Mimi, configured low-probability random triggers, and member-initiated DMs. DM memories use a private scope separate from every server. Per-user and per-channel cooldowns prevent spam. Reply context is fetched from Discord when available. Long messages are split below Discord's limit.
 
+Mimi does not send unsolicited outbound DMs. An inbound DM is answered in that same DM channel; there is no `create_dm`, `user.send`, or background-DM path. Mimi records first-contact state per user and server/DM scope and is instructed—and locally guarded—not to claim prior conversations or DM delivery without supported state or a confirmed send result.
+
 ## Commands
 
 `/help` lists the registered slash commands and arguments dynamically. `/memory` shows the requesting user's memories privately; `/forget memory_id:<id>` deletes one of that user's memories; `/forget-all confirm:true` deletes all memories in that private/server scope. `/diagnostics` and `/settings` are owner-only; diagnostics shows uptime, model, memory, budget mode, and resource status, while settings provides the owner control panel and model tests. No command grants ordinary users access to another user's memories or global settings.

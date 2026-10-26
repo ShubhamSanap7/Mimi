@@ -39,6 +39,12 @@ class Store:
               guild_id INTEGER PRIMARY KEY, owner_id INTEGER NOT NULL,
               last_seen_at TEXT NOT NULL, ping_sent_at TEXT, last_ping_at TEXT
             );
+            CREATE TABLE IF NOT EXISTS interactions (
+              user_id INTEGER NOT NULL, scope_id INTEGER NOT NULL,
+              first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL,
+              message_count INTEGER NOT NULL DEFAULT 1,
+              PRIMARY KEY(user_id, scope_id)
+            );
             """)
             try:
                 self.conn.execute("ALTER TABLE owner_activity ADD COLUMN last_ping_at TEXT")
@@ -89,6 +95,21 @@ class Store:
     def stats(self) -> tuple[int, int]:
         with self.lock:
             return tuple(self.conn.execute("SELECT COUNT(*), COUNT(DISTINCT user_id) FROM memories").fetchone())
+
+    def interaction_state(self, user_id: int, scope_id: int) -> sqlite3.Row | None:
+        with self.lock:
+            return self.conn.execute(
+                "SELECT * FROM interactions WHERE user_id=? AND scope_id=?",
+                (user_id, scope_id),
+            ).fetchone()
+
+    def record_interaction(self, user_id: int, scope_id: int, at: str) -> None:
+        with self.lock:
+            self.conn.execute("""INSERT INTO interactions(user_id,scope_id,first_seen_at,last_seen_at,message_count)
+                VALUES(?,?,?,?,1) ON CONFLICT(user_id,scope_id) DO UPDATE SET
+                last_seen_at=excluded.last_seen_at, message_count=message_count+1""",
+                (user_id, scope_id, at, at))
+            self.conn.commit()
 
     def usage(self, date_key: str) -> dict[str, int]:
         with self.lock:

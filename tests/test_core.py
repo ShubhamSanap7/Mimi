@@ -111,6 +111,18 @@ def test_owner_activity_ping_state_resets_on_activity(tmp_path: Path):
     store.close()
 
 
+def test_interaction_state_distinguishes_new_and_returning_users(tmp_path: Path):
+    store = Store(tmp_path / "data.sqlite3")
+    assert store.interaction_state(10, 20) is None
+    store.record_interaction(10, 20, "2026-10-26T00:00:00+00:00")
+    state = store.interaction_state(10, 20)
+    assert state["message_count"] == 1
+    store.record_interaction(10, 20, "2026-10-26T01:00:00+00:00")
+    assert store.interaction_state(10, 20)["message_count"] == 2
+    assert store.interaction_state(11, 20) is None
+    store.close()
+
+
 def test_concise_output_setting_is_configurable(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("MAX_OUTPUT_TOKENS", "220")
     settings = Settings.load(tmp_path)
