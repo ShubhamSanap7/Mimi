@@ -23,6 +23,13 @@ def _csv_strings(value: str) -> tuple[str, ...]:
     return tuple(item.strip().lower() for item in value.split(",") if item.strip())
 
 
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return 0
+
+
 @dataclass(slots=True)
 class Settings:
     base_dir: Path
@@ -68,6 +75,16 @@ class Settings:
     reaction_max_file_bytes: int = 8 * 1024 * 1024
     moderation_alert_channel_id: int = 0
     moderation_alert_keywords: tuple[str, ...] = ("scam", "phishing", "doxx", "raid")
+    multi_bot_enabled: bool = False
+    multi_bot_chromix_id: int = 1547663515077185711
+    multi_bot_blaze_id: int = 1563544804468723884
+    multi_bot_channel_id: int = 1564399737224954047
+    multi_bot_initiation_probability: float = 0.02
+    multi_bot_cooldown_seconds: float = 21600.0
+    multi_bot_quiet_seconds: float = 600.0
+    multi_bot_max_messages: int = 5
+    multi_bot_inactivity_seconds: float = 900.0
+    multi_bot_max_duration_seconds: float = 3600.0
     database_path: Path = Path("data/mimi.sqlite3")
 
     @classmethod
@@ -118,6 +135,16 @@ class Settings:
             reaction_max_file_bytes=min(8 * 1024 * 1024, max(1024, int(os.getenv("REACTION_MAX_FILE_BYTES", str(8 * 1024 * 1024))))),
             moderation_alert_channel_id=int(os.getenv("MODERATION_ALERT_CHANNEL_ID", "0")),
             moderation_alert_keywords=_csv_strings(os.getenv("MODERATION_ALERT_KEYWORDS", "scam,phishing,doxx,raid")),
+            multi_bot_enabled=os.getenv("MULTI_BOT_ENABLED", "false").lower() in {"1", "true", "yes"},
+            multi_bot_chromix_id=_env_int("MULTI_BOT_CHROMIX_ID", 1547663515077185711),
+            multi_bot_blaze_id=_env_int("MULTI_BOT_BLAZE_ID", 1563544804468723884),
+            multi_bot_channel_id=_env_int("MULTI_BOT_CHANNEL_ID", 1564399737224954047),
+            multi_bot_initiation_probability=min(1.0, max(0.0, float(os.getenv("MULTI_BOT_INITIATION_PROBABILITY", "0.02")))),
+            multi_bot_cooldown_seconds=max(0.0, float(os.getenv("MULTI_BOT_COOLDOWN_SECONDS", "21600"))),
+            multi_bot_quiet_seconds=max(0.0, float(os.getenv("MULTI_BOT_QUIET_SECONDS", "600"))),
+            multi_bot_max_messages=min(6, max(3, int(os.getenv("MULTI_BOT_MAX_MESSAGES", "5")))),
+            multi_bot_inactivity_seconds=max(1.0, float(os.getenv("MULTI_BOT_INACTIVITY_SECONDS", "900"))),
+            multi_bot_max_duration_seconds=max(60.0, float(os.getenv("MULTI_BOT_MAX_DURATION_SECONDS", "3600"))),
             database_path=base_dir / os.getenv("DATABASE_PATH", "data/mimi.sqlite3"),
         )
 
