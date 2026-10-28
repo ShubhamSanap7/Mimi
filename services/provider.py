@@ -16,13 +16,14 @@ log = logging.getLogger("mimi.provider")
 class ProviderError(RuntimeError):
     def __init__(self, message: str, *, category: str = "unknown", status_code: int | None = None,
                  provider_code: str | None = None, retryable: bool = False,
-                 exception_type: str | None = None):
+                 exception_type: str | None = None, request_id: str | None = None):
         super().__init__(message)
         self.category = category
         self.status_code = status_code
         self.provider_code = provider_code
         self.retryable = retryable
         self.exception_type = exception_type or type(self).__name__
+        self.request_id = request_id
 
 
 def _response_error_code(response: httpx.Response) -> str | None:
@@ -39,6 +40,8 @@ def _response_error_code(response: httpx.Response) -> str | None:
 
 def _classify_status(status_code: int, provider_code: str | None) -> tuple[str, bool]:
     code = (provider_code or "").lower()
+    if code in {"upstream_error", "upstream.error"}:
+        return "server", True
     if status_code in {408, 429}:
         return "rate_limit", True
     if status_code == 401:
@@ -77,6 +80,8 @@ class XKiroProvider:
                 if response.is_error:
                     code = _response_error_code(response)
                     category, retryable = _classify_status(response.status_code, code)
+                    headers = getattr(response, "headers", {})
+                    request_id = headers.get("x-request-id") or headers.get("request-id")
                     raise ProviderError(
                         f"{self.provider_name} request returned an HTTP error",
                         category=category,
@@ -84,6 +89,7 @@ class XKiroProvider:
                         provider_code=code,
                         retryable=retryable,
                         exception_type="HTTPStatusError",
+                        request_id=request_id[:120] if request_id else None,
                     )
                 try:
                     return response.json()
@@ -147,8 +153,8 @@ class XKiroProvider:
             except ProviderError as exc:
                 last_error = exc
                 log.warning(
-                    "Model request failed provider=%s route=%s category=%s status=%s code=%s exception=%s",
-                    self.provider_name, model_name, exc.category, exc.status_code, exc.provider_code, exc.exception_type,
+                    "Model request failed provider=%s route=%s category=%s status=%s code=%s request_id=%s exception=%s",
+                    self.provider_name, model_name, exc.category, exc.status_code, exc.provider_code, exc.request_id, exc.exception_type,
                 )
         if last_error is not None:
             raise ProviderError(
@@ -158,6 +164,7 @@ class XKiroProvider:
                 provider_code=last_error.provider_code,
                 retryable=last_error.retryable,
                 exception_type=last_error.exception_type,
+                request_id=last_error.request_id,
             ) from last_error
         raise ProviderError(f"All configured {self.provider_name} models failed", category="unknown")
 
@@ -204,6 +211,9 @@ class AIProviderRouter:
         self.settings = settings
         self.xkiro = XKiroProvider(settings)
         self.groq = GroqProvider(settings) if settings.groq_fallback_enabled and settings.groq_api_key else None
+        self.last_provider = "none"
+        self.last_fallback_attempted = False
+        self.last_fallback_succeeded = False
 
     @property
     def groq_configured(self) -> bool:
@@ -217,18 +227,24 @@ class AIProviderRouter:
     async def complete(self, messages: list[dict[str, Any]], *, use_web_search: bool = False,
                        model: str | None = None, temperature: float = 0.7,
                        max_tokens: int | None = None) -> tuple[str, str, dict[str, Any], dict[str, int | bool]]:
+        self.last_fallback_attempted = False
+        self.last_fallback_succeeded = False
         try:
-            return await self.xkiro.complete(
+            result = await self.xkiro.complete(
                 messages, use_web_search=use_web_search, model=model,
                 temperature=temperature, max_tokens=max_tokens,
             )
+            self.last_provider = f"xKiro/{result[1]}"
+            return result
         except ProviderError as xkiro_error:
+            self.last_provider = "xKiro/error"
             if not xkiro_error.retryable or not self.groq_configured:
                 raise
             if any(isinstance(item.get("content"), list) for item in messages) and not self.settings.groq_supports_vision:
                 log.warning("Groq fallback skipped category=invalid_request reason=vision_not_enabled")
                 raise
-            log.warning("Provider fallback route=xKiro->Groq category=%s status=%s", xkiro_error.category, xkiro_error.status_code)
+            self.last_fallback_attempted = True
+            log.warning("Provider fallback route=xKiro->Groq category=%s status=%s code=%s request_id=%s attempted=true", xkiro_error.category, xkiro_error.status_code, xkiro_error.provider_code, xkiro_error.request_id)
             try:
                 answer, used_model, search_info, usage = await self.groq.complete(
                     messages, use_web_search=False, model=None,
@@ -236,7 +252,10 @@ class AIProviderRouter:
                 )
                 if use_web_search:
                     search_info = {"status": "unavailable", "notice": "Live search was unavailable on the fallback provider."}
+                self.last_provider = f"Groq/{used_model}"
+                self.last_fallback_succeeded = True
                 return answer, f"groq/{used_model}", search_info, usage
             except ProviderError as groq_error:
-                log.warning("Provider fallback failed route=Groq category=%s status=%s", groq_error.category, groq_error.status_code)
+                self.last_provider = "Groq/error"
+                log.warning("Provider fallback failed route=Groq category=%s status=%s code=%s request_id=%s attempted=true", groq_error.category, groq_error.status_code, groq_error.provider_code, groq_error.request_id)
                 raise

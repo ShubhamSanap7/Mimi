@@ -150,6 +150,46 @@ def test_router_uses_groq_once_only_for_transient_xkiro_failure(tmp_path: Path):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("status,code", [(429, None), (500, None), (502, None), (503, None), (504, None), (400, "upstream_error")])
+def test_status_and_upstream_errors_are_groq_eligible(status: int, code: str | None, tmp_path: Path):
+    settings = Settings.load(PROJECT_ROOT)
+    settings.xkiro_api_key = "test-key"
+    settings.groq_api_key = "groq-test-key"
+    settings.database_path = tmp_path / f"router-{status}.sqlite3"
+    router = AIProviderRouter(settings)
+    calls = []
+
+    class Primary:
+        async def complete(self, *args, **kwargs):
+            calls.append("xkiro")
+            raise ProviderError("transient", category="server", status_code=status, provider_code=code, retryable=True)
+        async def close(self):
+            return None
+
+    class Secondary:
+        async def complete(self, *args, **kwargs):
+            calls.append("groq")
+            return "fallback", "qwen/qwen3.8-27b", {}, {"input_tokens": 1, "output_tokens": 1, "exact": True}
+        async def close(self):
+            return None
+
+    router.xkiro = Primary()
+    router.groq = Secondary()
+
+    async def run():
+        answer, model, _, _ = await router.complete([{"role": "user", "content": "hi"}])
+        assert answer == "fallback"
+        assert model == "groq/qwen/qwen3.8-27b"
+        assert calls == ["xkiro", "groq"]
+        await router.close()
+    asyncio.run(run())
+
+
+def test_groq_model_from_environment_is_preserved_exactly():
+    settings = Settings.load(PROJECT_ROOT)
+    assert settings.groq_model == "qwen/qwen3.8-27b"
+
+
 def test_router_does_not_use_groq_for_permanent_xkiro_error_or_missing_key(tmp_path: Path):
     settings = Settings.load(PROJECT_ROOT)
     settings.xkiro_api_key = "test-key"

@@ -65,13 +65,27 @@ class Store:
         with self.lock:
             self.conn.close()
 
-    def add_memory(self, user_id: int, guild_id: int, fact: str) -> None:
+    def add_memory(self, user_id: int, guild_id: int, fact: str) -> int:
         fingerprint = " ".join(fact.lower().split())[:500]
         with self.lock:
             self.conn.execute("""INSERT INTO memories(user_id,guild_id,fact,fingerprint,created_at,last_used_at)
                 VALUES(?,?,?,?,?,?) ON CONFLICT(user_id,guild_id,fingerprint) DO UPDATE SET fact=excluded.fact,last_used_at=excluded.last_used_at""",
                 (user_id, guild_id, fact[:500], fingerprint, now_iso(), now_iso()))
             self.conn.commit()
+            row = self.conn.execute(
+                "SELECT id FROM memories WHERE user_id=? AND guild_id=? AND fingerprint=?",
+                (user_id, guild_id, fingerprint),
+            ).fetchone()
+            return int(row["id"])
+
+    def find_memory_matches(self, user_id: int, guild_id: int, query: str) -> list[sqlite3.Row]:
+        normalized = " ".join(query.lower().split())
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT * FROM memories WHERE user_id=? AND guild_id=? ORDER BY id",
+                (user_id, guild_id),
+            ).fetchall()
+        return [row for row in rows if normalized and normalized in " ".join(row["fact"].lower().split())]
 
     def list_memories(self, user_id: int, guild_id: int, expiry_days: int, protected_user_ids: frozenset[int] = frozenset()) -> list[sqlite3.Row]:
         with self.lock:
