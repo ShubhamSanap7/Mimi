@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -45,6 +46,11 @@ class Store:
               message_count INTEGER NOT NULL DEFAULT 1,
               PRIMARY KEY(user_id, scope_id)
             );
+            CREATE TABLE IF NOT EXISTS multi_bot_topics (
+              id INTEGER PRIMARY KEY, channel_id INTEGER NOT NULL, participant_id INTEGER NOT NULL,
+              opening_key TEXT NOT NULL, topic_key TEXT NOT NULL, opened_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_multi_bot_topics_scope ON multi_bot_topics(channel_id, participant_id, opened_at);
             """)
             try:
                 self.conn.execute("ALTER TABLE owner_activity ADD COLUMN last_ping_at TEXT")
@@ -95,6 +101,59 @@ class Store:
     def stats(self) -> tuple[int, int]:
         with self.lock:
             return tuple(self.conn.execute("SELECT COUNT(*), COUNT(DISTINCT user_id) FROM memories").fetchone())
+
+    def runtime_overrides(self) -> dict[str, object]:
+        with self.lock:
+            rows = self.conn.execute("SELECT key, value FROM settings WHERE key LIKE 'runtime.%'").fetchall()
+        result: dict[str, object] = {}
+        for row in rows:
+            try:
+                result[str(row["key"])[8:]] = json.loads(row["value"])
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+        return result
+
+    def set_runtime_override(self, key: str, value: object) -> None:
+        encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        with self.lock:
+            self.conn.execute(
+                "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (f"runtime.{key}", encoded),
+            )
+            self.conn.commit()
+
+    def delete_runtime_override(self, key: str) -> None:
+        with self.lock:
+            self.conn.execute("DELETE FROM settings WHERE key=?", (f"runtime.{key}",))
+            self.conn.commit()
+
+    def clear_runtime_overrides(self, keys: list[str] | None = None) -> None:
+        with self.lock:
+            if keys is None:
+                self.conn.execute("DELETE FROM settings WHERE key LIKE 'runtime.%'")
+            else:
+                self.conn.executemany("DELETE FROM settings WHERE key=?", [(f"runtime.{key}",) for key in keys])
+            self.conn.commit()
+
+    def record_multi_bot_topic(self, channel_id: int, participant_id: int, opening_key: str, topic_key: str, opened_at: str) -> None:
+        with self.lock:
+            self.conn.execute(
+                "INSERT INTO multi_bot_topics(channel_id,participant_id,opening_key,topic_key,opened_at) VALUES(?,?,?,?,?)",
+                (channel_id, participant_id, opening_key[:200], topic_key[:200], opened_at),
+            )
+            self.conn.execute(
+                "DELETE FROM multi_bot_topics WHERE channel_id=? AND participant_id=? AND id NOT IN "
+                "(SELECT id FROM multi_bot_topics WHERE channel_id=? AND participant_id=? ORDER BY id DESC LIMIT 100)",
+                (channel_id, participant_id, channel_id, participant_id),
+            )
+            self.conn.commit()
+
+    def recent_multi_bot_topics(self, channel_id: int, participant_id: int, since: str) -> list[sqlite3.Row]:
+        with self.lock:
+            return list(self.conn.execute(
+                "SELECT opening_key, topic_key, opened_at FROM multi_bot_topics WHERE channel_id=? AND participant_id=? AND opened_at>=? ORDER BY id DESC LIMIT 50",
+                (channel_id, participant_id, since),
+            ))
 
     def interaction_state(self, user_id: int, scope_id: int) -> sqlite3.Row | None:
         with self.lock:

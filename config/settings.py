@@ -85,6 +85,12 @@ class Settings:
     multi_bot_max_messages: int = 5
     multi_bot_inactivity_seconds: float = 900.0
     multi_bot_max_duration_seconds: float = 3600.0
+    multi_bot_response_creativity: float = 0.7
+    multi_bot_typical_reply_length: int = 220
+    multi_bot_opener_cooldown_seconds: float = 604800.0
+    multi_bot_topic_repeat_protection: bool = True
+    multi_bot_reply_cooldown_seconds: float = 5.0
+    multi_bot_natural_end_enabled: bool = True
     database_path: Path = Path("data/mimi.sqlite3")
 
     @classmethod
@@ -145,6 +151,12 @@ class Settings:
             multi_bot_max_messages=min(6, max(3, int(os.getenv("MULTI_BOT_MAX_MESSAGES", "5")))),
             multi_bot_inactivity_seconds=max(1.0, float(os.getenv("MULTI_BOT_INACTIVITY_SECONDS", "900"))),
             multi_bot_max_duration_seconds=max(60.0, float(os.getenv("MULTI_BOT_MAX_DURATION_SECONDS", "3600"))),
+            multi_bot_response_creativity=min(1.0, max(0.0, float(os.getenv("MULTI_BOT_RESPONSE_CREATIVITY", "0.7")))),
+            multi_bot_typical_reply_length=min(600, max(80, int(os.getenv("MULTI_BOT_TYPICAL_REPLY_LENGTH", "220")))),
+            multi_bot_opener_cooldown_seconds=max(0.0, float(os.getenv("MULTI_BOT_OPENER_COOLDOWN_SECONDS", "604800"))),
+            multi_bot_topic_repeat_protection=os.getenv("MULTI_BOT_TOPIC_REPEAT_PROTECTION", "true").lower() in {"1", "true", "yes"},
+            multi_bot_reply_cooldown_seconds=max(0.0, float(os.getenv("MULTI_BOT_REPLY_COOLDOWN_SECONDS", "5"))),
+            multi_bot_natural_end_enabled=os.getenv("MULTI_BOT_NATURAL_END_ENABLED", "true").lower() in {"1", "true", "yes"},
             database_path=base_dir / os.getenv("DATABASE_PATH", "data/mimi.sqlite3"),
         )
 

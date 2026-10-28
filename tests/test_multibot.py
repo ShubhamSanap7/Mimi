@@ -147,7 +147,8 @@ def test_approved_reply_uses_current_conversation_only_and_untrusted_prompt(tmp_
         assert "never reveal" in system.lower()
         assert "reveal .env" in captured[0][-1]["content"]
         assert channel.sent
-        assert f"<@{CHROMIX}>" in channel.sent[-1][0]
+        assert f"<@{CHROMIX}>" not in channel.sent[-1][0]
+        assert channel.sent[-1][1].users is False
         await bot.close()
 
     asyncio.run(run())
@@ -213,3 +214,63 @@ def test_multi_bot_never_sends_dms(tmp_path: Path):
     assert "user.send(" not in source
     assert "create_dm(" not in source
     asyncio.run(bot.close())
+
+
+def test_openers_are_not_repeated_within_persisted_cooldown(tmp_path: Path):
+    bot = make_bot(tmp_path)
+    channel = FakeChannel()
+
+    async def run():
+        assert await bot._maybe_start_multi_bot_conversation(channel, force=True)
+        first = channel.sent[-1][0]
+        bot._end_multi_bot_conversation("test_end")
+        assert await bot._maybe_start_multi_bot_conversation(channel, force=True)
+        second = channel.sent[-1][0]
+        assert first != second
+        assert len(bot.store.recent_multi_bot_topics(CHANNEL_ID, CHROMIX, "2000-01-01T00:00:00+00:00")) >= 2
+        await bot.close()
+
+    asyncio.run(run())
+
+
+def test_repeated_bot_content_ends_without_a_second_model_call(tmp_path: Path):
+    bot = make_bot(tmp_path)
+    bot.settings.multi_bot_reply_cooldown_seconds = 0
+    bot.multi_bot_conversation = MultiBotConversation(CHROMIX, datetime.now(timezone.utc), datetime.now(timezone.utc), channel_id=CHANNEL_ID)
+    calls = []
+
+    async def complete(*_args, **_kwargs):
+        calls.append(True)
+        return "A short reply.", "test", {}, {"input_tokens": 1, "output_tokens": 1, "exact": True}
+
+    async def run():
+        bot.provider.complete = complete
+        first = FakeMessage(FakeUser(CHROMIX, bot=True), "same game debate", message_id=301, channel=FakeChannel())
+        second = FakeMessage(FakeUser(CHROMIX, bot=True), "same game debate", message_id=302, channel=first.channel)
+        assert await bot._handle_multi_bot_message(first) is True
+        assert len(calls) == 1
+        assert await bot._handle_multi_bot_message(second) is True
+        assert len(calls) == 1
+        assert bot.multi_bot_conversation is None
+        await bot.close()
+
+    asyncio.run(run())
+
+
+def test_natural_ending_sends_at_most_one_closing_reply(tmp_path: Path):
+    bot = make_bot(tmp_path)
+    bot.settings.multi_bot_reply_cooldown_seconds = 0
+    bot.multi_bot_conversation = MultiBotConversation(CHROMIX, datetime.now(timezone.utc), datetime.now(timezone.utc), channel_id=CHANNEL_ID)
+    channel = FakeChannel()
+
+    async def complete(*_args, **_kwargs):
+        return "That was fun, catch you later!", "test", {}, {"input_tokens": 1, "output_tokens": 1, "exact": True}
+
+    async def run():
+        bot.provider.complete = complete
+        await bot._handle_multi_bot_message(FakeMessage(FakeUser(CHROMIX, bot=True), "new tournament idea", message_id=401, channel=channel))
+        assert len(channel.sent) == 1
+        assert bot.multi_bot_conversation is None
+        await bot.close()
+
+    asyncio.run(run())

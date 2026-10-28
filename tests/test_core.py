@@ -190,7 +190,7 @@ def test_help_uses_registered_commands():
     from main import bot, command_help_text
 
     names = {command.name for command in bot.tree.get_commands()}
-    assert names == {"help", "memory", "forget", "forget-all", "diagnostics", "settings"}
+    assert names == {"help", "memory", "forget", "forget-all", "diagnostics", "settings", "dashboard"}
     text = command_help_text(bot.tree)
     for name in names:
         assert f"/{name}" in text
