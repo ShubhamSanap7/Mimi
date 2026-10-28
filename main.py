@@ -19,7 +19,7 @@ from discord.ext import commands, tasks
 from config.settings import Settings
 from database.store import Store
 from services.personality import load_personality
-from services.provider import ProviderError, XKiroProvider
+from services.provider import AIProviderRouter, ProviderError
 from services.reactions import ReactionLibrary
 from services.multibot import MultiBotConversation, configured_participants, utc_now
 from services.multibot import opener_fingerprint, topic_fingerprint, topics_overlap
@@ -325,7 +325,7 @@ class MimiBot(commands.Bot):
         self.store = Store(settings.database_path)
         self.vision_enabled = settings.vision_default
         self.runtime_settings = RuntimeSettings(settings, self.store, on_change=self._runtime_setting_changed)
-        self.provider = XKiroProvider(settings)
+        self.provider = AIProviderRouter(settings)
         self.personality = load_personality(settings.base_dir)
         self.started_at = time.monotonic()
         self.histories: dict[tuple[int, int, int], deque[dict]] = defaultdict(lambda: deque(maxlen=settings.max_context_messages))
@@ -510,8 +510,10 @@ class MimiBot(commands.Bot):
         total, users = self.store.stats()
         usage = self.usage_status()
         ram = shutil.disk_usage(BASE_DIR)
+        groq_status = "configured" if self.provider.groq_configured else "unconfigured/disabled"
         return (f"Uptime: {int(time.monotonic() - self.started_at)}s\nLatency: {self.latency * 1000:.0f}ms\n"
-                f"Model: {self.settings.primary_model} (fallback configured)\nRandom: {self.settings.random_probability:.2%}\n"
+                f"Primary: xKiro/{self.settings.primary_model} (fallback model configured)\n"
+                f"Secondary: Groq/{self.settings.groq_model} ({groq_status})\nRandom: {self.settings.random_probability:.2%}\n"
                 f"Vision: {'on' if self.vision_enabled else 'off'}\nMemory rows/users: {total}/{users}\n"
                 f"Usage: {usage['used_tokens']:,}/{usage['budget']:,} ({usage['mode']}, {'exact' if usage['exact'] else 'estimated'})\n"
                 f"Disk free: {ram.free // (1024**2)} MB\nRecent errors: {len(self.error_messages)}\n"

@@ -55,8 +55,11 @@ def _classify_status(status_code: int, provider_code: str | None) -> tuple[str, 
 
 
 class XKiroProvider:
+    provider_name = "xKiro"
+
     def __init__(self, settings: Settings):
         self.settings = settings
+        self.request_retries = settings.max_retries
         self.client = httpx.AsyncClient(
             base_url=settings.xkiro_base_url,
             headers={"Authorization": f"Bearer {settings.xkiro_api_key}", "Content-Type": "application/json"},
@@ -68,14 +71,14 @@ class XKiroProvider:
 
     async def _request(self, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         last_error: ProviderError | None = None
-        for attempt in range(self.settings.max_retries + 1):
+        for attempt in range(self.request_retries + 1):
             try:
                 response = await self.client.get(path) if payload is None else await self.client.post(path, json=payload)
                 if response.is_error:
                     code = _response_error_code(response)
                     category, retryable = _classify_status(response.status_code, code)
                     raise ProviderError(
-                        "xKiro request returned an HTTP error",
+                        f"{self.provider_name} request returned an HTTP error",
                         category=category,
                         status_code=response.status_code,
                         provider_code=code,
@@ -86,24 +89,24 @@ class XKiroProvider:
                     return response.json()
                 except (ValueError, TypeError) as exc:
                     raise ProviderError(
-                        "xKiro returned invalid JSON",
+                        f"{self.provider_name} returned invalid JSON",
                         category="server", retryable=True, exception_type=type(exc).__name__,
                     ) from exc
             except ProviderError as exc:
                 last_error = exc
-                if exc.retryable and attempt < self.settings.max_retries:
+                if exc.retryable and attempt < self.request_retries:
                     await asyncio.sleep(0.5 * (2**attempt))
                     continue
                 raise
             except httpx.TimeoutException as exc:
-                last_error = ProviderError("xKiro request timed out", category="network", retryable=True, exception_type=type(exc).__name__)
+                last_error = ProviderError(f"{self.provider_name} request timed out", category="network", retryable=True, exception_type=type(exc).__name__)
             except (httpx.ConnectError, httpx.NetworkError) as exc:
-                last_error = ProviderError("xKiro network request failed", category="network", retryable=True, exception_type=type(exc).__name__)
+                last_error = ProviderError(f"{self.provider_name} network request failed", category="network", retryable=True, exception_type=type(exc).__name__)
             except httpx.HTTPError as exc:
-                last_error = ProviderError("xKiro transport request failed", category="network", retryable=True, exception_type=type(exc).__name__)
+                last_error = ProviderError(f"{self.provider_name} transport request failed", category="network", retryable=True, exception_type=type(exc).__name__)
             except ValueError as exc:
-                last_error = ProviderError("xKiro request configuration was invalid", category="invalid_request", exception_type=type(exc).__name__)
-            if last_error and last_error.retryable and attempt < self.settings.max_retries:
+                last_error = ProviderError(f"{self.provider_name} request configuration was invalid", category="invalid_request", exception_type=type(exc).__name__)
+            if last_error and last_error.retryable and attempt < self.request_retries:
                 await asyncio.sleep(0.5 * (2**attempt))
                 continue
             if last_error:
@@ -114,13 +117,8 @@ class XKiroProvider:
         data = await self._request("/models")
         return [str(item.get("id")) for item in data.get("data", []) if item.get("id")]
 
-    async def complete(self, messages: list[dict[str, Any]], *, use_web_search: bool = False,
-                       model: str | None = None, temperature: float = 0.7,
-                       max_tokens: int | None = None) -> tuple[str, str, dict[str, Any], dict[str, int | bool]]:
-        requested_model = model or self.settings.primary_model
-        models = [requested_model]
-        if requested_model == self.settings.primary_model and self.settings.fallback_model != requested_model:
-            models.append(self.settings.fallback_model)
+    async def _complete_models(self, messages: list[dict[str, Any]], models: list[str], *, use_web_search: bool,
+                               temperature: float, max_tokens: int | None) -> tuple[str, str, dict[str, Any], dict[str, int | bool]]:
         last_error: Exception | None = None
         for model_name in models:
             payload: dict[str, Any] = {"model": model_name, "messages": messages,
@@ -149,16 +147,96 @@ class XKiroProvider:
             except ProviderError as exc:
                 last_error = exc
                 log.warning(
-                    "Model request failed route=%s category=%s status=%s code=%s exception=%s",
-                    model_name, exc.category, exc.status_code, exc.provider_code, exc.exception_type,
+                    "Model request failed provider=%s route=%s category=%s status=%s code=%s exception=%s",
+                    self.provider_name, model_name, exc.category, exc.status_code, exc.provider_code, exc.exception_type,
                 )
         if last_error is not None:
             raise ProviderError(
-                "All configured xKiro models failed",
+                f"All configured {self.provider_name} models failed",
                 category=last_error.category,
                 status_code=last_error.status_code,
                 provider_code=last_error.provider_code,
                 retryable=last_error.retryable,
                 exception_type=last_error.exception_type,
             ) from last_error
-        raise ProviderError("All configured xKiro models failed", category="unknown")
+        raise ProviderError(f"All configured {self.provider_name} models failed", category="unknown")
+
+    async def complete(self, messages: list[dict[str, Any]], *, use_web_search: bool = False,
+                       model: str | None = None, temperature: float = 0.7,
+                       max_tokens: int | None = None) -> tuple[str, str, dict[str, Any], dict[str, int | bool]]:
+        requested_model = model or self.settings.primary_model
+        models = [requested_model]
+        if requested_model == self.settings.primary_model and self.settings.fallback_model != requested_model:
+            models.append(self.settings.fallback_model)
+        return await self._complete_models(
+            messages, models, use_web_search=use_web_search,
+            temperature=temperature, max_tokens=max_tokens,
+        )
+
+
+class GroqProvider(XKiroProvider):
+    """Single-model Groq fallback; retries are deliberately disabled here."""
+
+    provider_name = "Groq"
+
+    def __init__(self, settings: Settings):
+        self.settings = settings
+        self.request_retries = 0
+        self.client = httpx.AsyncClient(
+            base_url=settings.groq_base_url,
+            headers={"Authorization": f"Bearer {settings.groq_api_key}", "Content-Type": "application/json"},
+            timeout=settings.request_timeout_seconds,
+        )
+
+    async def complete(self, messages: list[dict[str, Any]], *, use_web_search: bool = False,
+                       model: str | None = None, temperature: float = 0.7,
+                       max_tokens: int | None = None) -> tuple[str, str, dict[str, Any], dict[str, int | bool]]:
+        return await self._complete_models(
+            messages, [model or self.settings.groq_model], use_web_search=False,
+            temperature=temperature, max_tokens=max_tokens,
+        )
+
+
+class AIProviderRouter:
+    """Use xKiro first, then one Groq attempt only for retryable xKiro failures."""
+
+    def __init__(self, settings: Settings):
+        self.settings = settings
+        self.xkiro = XKiroProvider(settings)
+        self.groq = GroqProvider(settings) if settings.groq_fallback_enabled and settings.groq_api_key else None
+
+    @property
+    def groq_configured(self) -> bool:
+        return self.settings.groq_fallback_enabled and self.groq is not None
+
+    async def close(self) -> None:
+        await self.xkiro.close()
+        if self.groq is not None:
+            await self.groq.close()
+
+    async def complete(self, messages: list[dict[str, Any]], *, use_web_search: bool = False,
+                       model: str | None = None, temperature: float = 0.7,
+                       max_tokens: int | None = None) -> tuple[str, str, dict[str, Any], dict[str, int | bool]]:
+        try:
+            return await self.xkiro.complete(
+                messages, use_web_search=use_web_search, model=model,
+                temperature=temperature, max_tokens=max_tokens,
+            )
+        except ProviderError as xkiro_error:
+            if not xkiro_error.retryable or not self.groq_configured:
+                raise
+            if any(isinstance(item.get("content"), list) for item in messages) and not self.settings.groq_supports_vision:
+                log.warning("Groq fallback skipped category=invalid_request reason=vision_not_enabled")
+                raise
+            log.warning("Provider fallback route=xKiro->Groq category=%s status=%s", xkiro_error.category, xkiro_error.status_code)
+            try:
+                answer, used_model, search_info, usage = await self.groq.complete(
+                    messages, use_web_search=False, model=None,
+                    temperature=temperature, max_tokens=max_tokens,
+                )
+                if use_web_search:
+                    search_info = {"status": "unavailable", "notice": "Live search was unavailable on the fallback provider."}
+                return answer, f"groq/{used_model}", search_info, usage
+            except ProviderError as groq_error:
+                log.warning("Provider fallback failed route=Groq category=%s status=%s", groq_error.category, groq_error.status_code)
+                raise

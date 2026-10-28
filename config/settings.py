@@ -38,6 +38,11 @@ class Settings:
     xkiro_base_url: str = "https://api.xkiro.com/v1"
     primary_model: str = "qwen/qwen3.8-max:free"
     fallback_model: str = "qwen/qwen3-max:free"
+    groq_api_key: str = ""
+    groq_model: str = "llama-3.3-70b-versatile"
+    groq_base_url: str = "https://api.groq.com/openai/v1"
+    groq_fallback_enabled: bool = True
+    groq_supports_vision: bool = False
     owner_ids: frozenset[int] = field(default_factory=frozenset)
     memory_never_expire_user_ids: frozenset[int] = field(default_factory=frozenset)
     excluded_channel_ids: frozenset[int] = field(default_factory=frozenset)
@@ -104,6 +109,11 @@ class Settings:
             xkiro_base_url=os.getenv("XKIRO_BASE_URL", "https://api.xkiro.com/v1").rstrip("/"),
             primary_model=os.getenv("XKIRO_PRIMARY_MODEL", "qwen/qwen3.8-max:free"),
             fallback_model=os.getenv("XKIRO_FALLBACK_MODEL", "qwen/qwen3-max:free"),
+            groq_api_key=os.getenv("GROQ_API_KEY", "").strip(),
+            groq_model=os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip(),
+            groq_base_url=os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1").rstrip("/"),
+            groq_fallback_enabled=os.getenv("GROQ_FALLBACK_ENABLED", "true").lower() in {"1", "true", "yes"},
+            groq_supports_vision=os.getenv("GROQ_SUPPORTS_VISION", "false").lower() in {"1", "true", "yes"},
             owner_ids=_csv_ints(os.getenv("OWNER_DISCORD_IDS", "")),
             memory_never_expire_user_ids=_csv_ints(os.getenv("MEMORY_NEVER_EXPIRE_USER_IDS", "")),
             excluded_channel_ids=_csv_ints(os.getenv("EXCLUDED_CHANNEL_IDS", "")),

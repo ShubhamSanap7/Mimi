@@ -61,6 +61,8 @@ def _specs() -> tuple[SettingSpec, ...]:
         SettingSpec("budget_low_fraction", "AI and token budgets", "Low-budget fraction", "Threshold that disables optional work.", "float", 0.05, 0.9),
         SettingSpec("primary_model", "AI and token budgets", "Primary model", "Configured xKiro model identifier.", "str", live=True),
         SettingSpec("fallback_model", "AI and token budgets", "Fallback model", "Configured fallback model identifier.", "str", live=True),
+        SettingSpec("groq_model", "AI and token budgets", "Groq fallback model", "Model used only after a retryable xKiro failure.", "str", live=True),
+        SettingSpec("groq_fallback_enabled", "AI and token budgets", "Groq fallback enabled", "Enable the Groq route when a key is configured; no key is ever created by this control.", "bool"),
         SettingSpec("max_web_searches_per_day", "AI and token budgets", "Daily web-search limit", "Maximum optional searches per local day.", "int", 0, 1000),
         SettingSpec("max_vision_requests_per_day", "AI and token budgets", "Daily vision limit", "Maximum optional vision requests per local day.", "int", 0, 1000),
         SettingSpec("max_concurrent_requests", "AI and token budgets", "Concurrent AI requests", "Maximum simultaneous provider requests; restart required for the semaphore.", "int", 1, 8, live=False),
