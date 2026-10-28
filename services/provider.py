@@ -125,7 +125,7 @@ class XKiroProvider:
                                        "temperature": temperature,
                                        "max_tokens": max_tokens or self.settings.max_output_tokens}
             if use_web_search:
-                payload["web_search"] = {"enable": True, "count": 5}
+                payload["web_search"] = {"enable": True, "count": self.settings.max_web_search_results}
             try:
                 data = await self._request("/chat/completions", payload)
                 content = data.get("choices", [{}])[0].get("message", {}).get("content")

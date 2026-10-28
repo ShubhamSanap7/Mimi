@@ -9,6 +9,7 @@ from config.settings import Settings
 from database.store import Store
 from main import DashboardView, MimiBot
 from services.runtime_settings import RuntimeSettings
+from services.runtime_settings import EXCLUDED_SETTINGS
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -75,6 +76,38 @@ def test_dashboard_categories_only_reference_existing_settings(tmp_path: Path):
             assert hasattr(registry.settings, spec.key)
     assert "Multi-bot conversations" in registry.categories()
     assert "GIFs and reactions" in registry.categories()
+    store.close()
+
+
+def test_registry_covers_every_settings_field_except_documented_exclusions(tmp_path: Path):
+    from dataclasses import fields
+
+    _, store, registry = make_registry(tmp_path)
+    settings_keys = {field.name for field in fields(registry.settings)}
+    missing = settings_keys - set(registry.specs) - set(EXCLUDED_SETTINGS)
+    assert missing == set()
+    assert {"discord_token", "xkiro_api_key", "groq_api_key", "owner_ids"} <= set(EXCLUDED_SETTINGS)
+    assert registry.inventory()["excluded"] == EXCLUDED_SETTINGS
+    store.close()
+
+
+def test_runtime_change_updates_consumer_and_records_nonsecret_audit(tmp_path: Path):
+    settings, store, registry = make_registry(tmp_path)
+    assert registry.set("personality_prompt", "A concise test personality.", changed_by=123) == "A concise test personality."
+    assert settings.personality_prompt == "A concise test personality."
+    rows = store.recent_setting_audit()
+    assert rows[0]["changed_by"] == 123
+    assert rows[0]["setting_key"] == "personality_prompt"
+    assert "A concise" not in rows[0]["old_value"] or "length=" in rows[0]["new_value"]
+    store.close()
+
+
+def test_dashboard_marks_startup_captured_settings_and_allows_empty_prompt_reset(tmp_path: Path):
+    _, store, registry = make_registry(tmp_path)
+    assert registry.specs["max_retries"].live is False
+    assert registry.specs["request_timeout_seconds"].live is False
+    assert registry.set("personality_prompt", "") == ""
+    assert registry.value("personality_prompt") == ""
     store.close()
 
 

@@ -65,6 +65,9 @@ class Settings:
     max_concurrent_requests: int = 2
     max_web_searches_per_day: int = 10
     max_vision_requests_per_day: int = 50
+    max_web_search_results: int = 5
+    vision_max_attachment_bytes: int = 5 * 1024 * 1024
+    max_relevant_memories: int = 4
     inactivity_enabled: bool = False
     inactivity_owner_id: int = 0
     inactivity_guild_id: int = 0
@@ -72,6 +75,7 @@ class Settings:
     inactivity_threshold_hours: float = 12.0
     inactivity_ping_cooldown_hours: float = 24.0
     inactivity_template: str = "Where did you vanish to, {owner}? Mimi was about to file a tiny missing-person report."
+    inactivity_check_interval_seconds: float = 900.0
     reaction_library_dir: Path = Path("config/reactions")
     reaction_probability: float = 0.12
     reaction_highlight_probability: float = 0.30
@@ -96,12 +100,19 @@ class Settings:
     multi_bot_topic_repeat_protection: bool = True
     multi_bot_reply_cooldown_seconds: float = 5.0
     multi_bot_natural_end_enabled: bool = True
+    multi_bot_check_interval_seconds: float = 60.0
     database_path: Path = Path("data/mimi.sqlite3")
+    personality_prompt: str = ""
 
     @classmethod
     def load(cls, base_dir: Path) -> "Settings":
         load_dotenv(base_dir / ".env")
         probability = min(1.0, max(0.0, float(os.getenv("RANDOM_RESPONSE_PROBABILITY", "0.02"))))
+        personality_path = base_dir / "config" / "personality.md"
+        try:
+            personality_prompt = personality_path.read_text(encoding="utf-8")[:30000].strip()
+        except OSError:
+            personality_prompt = ""
         return cls(
             base_dir=base_dir,
             discord_token=os.getenv("DISCORD_TOKEN", "").strip(),
@@ -136,6 +147,9 @@ class Settings:
             max_concurrent_requests=min(8, max(1, int(os.getenv("MAX_CONCURRENT_REQUESTS", "2")))),
             max_web_searches_per_day=max(0, int(os.getenv("MAX_WEB_SEARCHES_PER_DAY", "10"))),
             max_vision_requests_per_day=max(0, int(os.getenv("MAX_VISION_REQUESTS_PER_DAY", "50"))),
+            max_web_search_results=min(10, max(1, int(os.getenv("MAX_WEB_SEARCH_RESULTS", "5")))),
+            vision_max_attachment_bytes=min(5 * 1024 * 1024, max(64 * 1024, int(os.getenv("VISION_MAX_ATTACHMENT_BYTES", str(5 * 1024 * 1024))))),
+            max_relevant_memories=min(12, max(1, int(os.getenv("MAX_RELEVANT_MEMORIES", "4")))),
             inactivity_enabled=os.getenv("INACTIVITY_PING_ENABLED", "false").lower() in {"1", "true", "yes"},
             inactivity_owner_id=int(os.getenv("INACTIVITY_OWNER_ID", "0")),
             inactivity_guild_id=int(os.getenv("INACTIVITY_GUILD_ID", "0")),
@@ -143,6 +157,7 @@ class Settings:
             inactivity_threshold_hours=max(1.0, float(os.getenv("INACTIVITY_THRESHOLD_HOURS", "12"))),
             inactivity_ping_cooldown_hours=max(1.0, float(os.getenv("INACTIVITY_PING_COOLDOWN_HOURS", "24"))),
             inactivity_template=os.getenv("INACTIVITY_TEMPLATE", "Where did you vanish to, {owner}? Mimi was about to file a tiny missing-person report."),
+            inactivity_check_interval_seconds=min(3600.0, max(60.0, float(os.getenv("INACTIVITY_CHECK_INTERVAL_SECONDS", "900")))),
             reaction_library_dir=base_dir / os.getenv("REACTION_LIBRARY_DIR", "config/reactions"),
             reaction_probability=min(1.0, max(0.0, float(os.getenv("REACTION_PROBABILITY", "0.12")))),
             reaction_highlight_probability=min(1.0, max(0.0, float(os.getenv("REACTION_HIGHLIGHT_PROBABILITY", "0.30")))),
@@ -167,7 +182,9 @@ class Settings:
             multi_bot_topic_repeat_protection=os.getenv("MULTI_BOT_TOPIC_REPEAT_PROTECTION", "true").lower() in {"1", "true", "yes"},
             multi_bot_reply_cooldown_seconds=max(0.0, float(os.getenv("MULTI_BOT_REPLY_COOLDOWN_SECONDS", "5"))),
             multi_bot_natural_end_enabled=os.getenv("MULTI_BOT_NATURAL_END_ENABLED", "true").lower() in {"1", "true", "yes"},
+            multi_bot_check_interval_seconds=min(3600.0, max(15.0, float(os.getenv("MULTI_BOT_CHECK_INTERVAL_SECONDS", "60")))),
             database_path=base_dir / os.getenv("DATABASE_PATH", "data/mimi.sqlite3"),
+            personality_prompt=personality_prompt,
         )
 
     def validate_runtime(self) -> list[str]:

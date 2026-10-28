@@ -27,6 +27,10 @@ class Store:
             );
             CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(user_id, guild_id);
             CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS setting_audit (
+              id INTEGER PRIMARY KEY, changed_by INTEGER NOT NULL, changed_at TEXT NOT NULL,
+              setting_key TEXT NOT NULL, old_value TEXT NOT NULL, new_value TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS summaries (
               guild_id INTEGER NOT NULL, channel_id INTEGER NOT NULL, user_id INTEGER NOT NULL,
               summary TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(guild_id, channel_id, user_id)
@@ -134,6 +138,21 @@ class Store:
             else:
                 self.conn.executemany("DELETE FROM settings WHERE key=?", [(f"runtime.{key}",) for key in keys])
             self.conn.commit()
+
+    def record_setting_audit(self, changed_by: int, changed_at: str, setting_key: str, old_value: object, new_value: object) -> None:
+        with self.lock:
+            self.conn.execute(
+                "INSERT INTO setting_audit(changed_by,changed_at,setting_key,old_value,new_value) VALUES(?,?,?,?,?)",
+                (changed_by, changed_at, setting_key, json.dumps(old_value, ensure_ascii=False, default=str), json.dumps(new_value, ensure_ascii=False, default=str)),
+            )
+            self.conn.commit()
+
+    def recent_setting_audit(self, limit: int = 20) -> list[sqlite3.Row]:
+        with self.lock:
+            return list(self.conn.execute(
+                "SELECT changed_by,changed_at,setting_key,old_value,new_value FROM setting_audit ORDER BY id DESC LIMIT ?",
+                (max(1, min(100, limit)),),
+            ))
 
     def record_multi_bot_topic(self, channel_id: int, participant_id: int, opening_key: str, topic_key: str, opened_at: str) -> None:
         with self.lock:

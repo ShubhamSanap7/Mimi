@@ -133,6 +133,17 @@ def dashboard_embed(bot: "MimiBot", category: str | None = None, selected: str |
     embed = discord.Embed(title=f"Mimi Control Center · {category}", color=discord.Color.pink())
     for spec in registry.specs_for(category):
         value = _dashboard_value(registry.value(spec.key))
+        default_value = _dashboard_value(registry.environment_defaults.get(spec.key, "fixed"))
+        if spec.kind == "long_text":
+            value = f"<personality text: {len(str(registry.value(spec.key)))} characters; edit modal has chunked fields>"
+            default_value = f"<text: {len(str(registry.environment_defaults.get(spec.key, '')))} characters>"
+        constraints = []
+        if spec.minimum is not None:
+            constraints.append(f"min {spec.minimum}")
+        if spec.maximum is not None:
+            constraints.append(f"max {spec.maximum}")
+        if spec.choices:
+            constraints.append("choices: " + ", ".join(spec.choices))
         flags = []
         if registry.is_overridden(spec.key):
             flags.append("override")
@@ -141,7 +152,9 @@ def dashboard_embed(bot: "MimiBot", category: str | None = None, selected: str |
         if not spec.editable:
             flags.append("fixed safety behavior")
         suffix = f" ({', '.join(flags)})" if flags else ""
-        embed.add_field(name=f"{spec.label}{suffix}", value=f"`{value}`\n{spec.description}", inline=False)
+        rules = f"Allowed: {'; '.join(constraints)}\n" if constraints else ""
+        field_value = f"Current: `{value}`\nDefault: `{default_value}`\n{rules}{spec.description}"
+        embed.add_field(name=f"{spec.label}{suffix}", value=field_value[:1024], inline=False)
     if selected and selected in registry.specs:
         spec = registry.specs[selected]
         embed.set_footer(text=f"Selected: {spec.label} · use Edit, Reset, or Save below")
@@ -165,20 +178,38 @@ class DashboardSettingModal(discord.ui.Modal):
         super().__init__(title=f"Edit {spec.label}"[:45], timeout=300)
         self.view_ref = view
         self.spec = spec
-        self.value_input = discord.ui.TextInput(
-            label=spec.label[:45],
-            default=_dashboard_value(view.bot.runtime_settings.value(spec.key))[:4000],
-            required=True,
-            style=discord.TextStyle.short if spec.kind not in {"csv_ints", "csv_strings"} else discord.TextStyle.paragraph,
-        )
-        self.add_item(self.value_input)
+        current = _dashboard_value(view.bot.runtime_settings.value(spec.key))
+        if spec.kind == "long_text":
+            self.value_inputs = []
+            for index in range(4):
+                field = discord.ui.TextInput(
+                    label=f"{spec.label[:35]} part {index + 1}",
+                    default=current[index * 3800:(index + 1) * 3800],
+                    required=False,
+                    style=discord.TextStyle.paragraph,
+                    max_length=3800,
+                )
+                self.value_inputs.append(field)
+                self.add_item(field)
+        else:
+            self.value_input = discord.ui.TextInput(
+                label=spec.label[:45],
+                default=current[:4000],
+                required=True,
+                style=discord.TextStyle.short if spec.kind not in {"csv_ints", "csv_strings"} else discord.TextStyle.paragraph,
+            )
+            self.add_item(self.value_input)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         if interaction.user.id not in self.view_ref.bot.settings.owner_ids:
             await interaction.response.send_message("This dashboard is owner-only.", ephemeral=True, allowed_mentions=safe_allowed_mentions())
             return
         try:
-            value = self.view_ref.bot.runtime_settings.set(self.spec.key, self.value_input.value)
+            raw_value = "".join(field.value for field in self.value_inputs) if self.spec.kind == "long_text" else self.value_input.value
+            value = self.view_ref.bot.runtime_settings.set(
+                self.spec.key, raw_value, changed_by=interaction.user.id,
+                expected_revision=self.view_ref.selected_revision,
+            )
         except (KeyError, TypeError, ValueError) as exc:
             await interaction.response.send_message(f"Invalid value: {exc}", ephemeral=True, allowed_mentions=safe_allowed_mentions())
             return
@@ -195,6 +226,9 @@ class DashboardView(discord.ui.View, DashboardAuthorizationMixin):
         self.bot = bot
         self.category = category
         self.selected = selected
+        self.selected_revision = bot.runtime_settings.revision(selected) if selected else None
+        snapshot_specs = bot.runtime_settings.specs_for(category) if category else list(bot.runtime_settings.specs.values())
+        self.snapshot_revisions = {spec.key: bot.runtime_settings.revision(spec.key) for spec in snapshot_specs}
         if category is None:
             self.add_item(DashboardCategorySelect(bot, self))
         else:
@@ -217,7 +251,11 @@ class DashboardView(discord.ui.View, DashboardAuthorizationMixin):
             await interaction.response.send_message("That safety control is fixed in code.", ephemeral=True, allowed_mentions=safe_allowed_mentions())
             return
         if spec.kind == "bool":
-            value = self.bot.runtime_settings.set(spec.key, not bool(self.bot.runtime_settings.value(spec.key)))
+            value = self.bot.runtime_settings.set(
+                spec.key, not bool(self.bot.runtime_settings.value(spec.key)),
+                changed_by=interaction.user.id, expected_revision=self.selected_revision,
+            )
+            self.selected_revision = self.bot.runtime_settings.revision(spec.key)
             await interaction.response.edit_message(embed=dashboard_embed(self.bot, self.category, self.selected), view=self)
             await interaction.followup.send(f"Saved `{spec.label}` as `{_dashboard_value(value)}`.", ephemeral=True, allowed_mentions=safe_allowed_mentions())
             return
@@ -233,7 +271,11 @@ class DashboardView(discord.ui.View, DashboardAuthorizationMixin):
             await interaction.response.send_message("Select a setting first.", ephemeral=True, allowed_mentions=safe_allowed_mentions())
             return
         try:
-            value = self.bot.runtime_settings.reset(self.selected)
+            value = self.bot.runtime_settings.reset(
+                self.selected, changed_by=interaction.user.id,
+                expected_revision=self.selected_revision,
+            )
+            self.selected_revision = self.bot.runtime_settings.revision(self.selected)
         except (KeyError, ValueError) as exc:
             await interaction.response.send_message(str(exc), ephemeral=True, allowed_mentions=safe_allowed_mentions())
             return
@@ -244,7 +286,7 @@ class DashboardView(discord.ui.View, DashboardAuthorizationMixin):
     async def reset_all(self, interaction: discord.Interaction, _: discord.ui.Button):
         await interaction.response.edit_message(
             content="Confirm reset of all editable dashboard overrides to the current environment defaults.",
-            embed=None, view=DashboardConfirmResetView(self.bot), allowed_mentions=safe_allowed_mentions(),
+            embed=None, view=DashboardConfirmResetView(self.bot, expected_revisions=self.snapshot_revisions), allowed_mentions=safe_allowed_mentions(),
         )
 
     @discord.ui.button(label="Home", style=discord.ButtonStyle.secondary, row=2)
@@ -259,7 +301,21 @@ class DashboardView(discord.ui.View, DashboardAuthorizationMixin):
         status += f"\nMulti-bot channel resolved: {'yes' if channel else 'no'}"
         status += f"\nConfigured participant IDs: {len(configured)}"
         status += f"\nActive conversation: {'yes' if self.bot.multi_bot_conversation else 'no'}"
+        audit = self.bot.store.recent_setting_audit(5)
+        if audit:
+            status += "\nRecent setting changes: " + "; ".join(f"{row['setting_key']} by {row['changed_by']}" for row in audit)
+        status += f"\nRegistry coverage: {len(self.bot.runtime_settings.specs)} editable/fixed settings, {len(self.bot.runtime_settings.inventory()['excluded'])} excluded by safety/host policy"
         await interaction.response.send_message(status[:1900], ephemeral=True, allowed_mentions=safe_allowed_mentions())
+
+    @discord.ui.button(label="Reset category", style=discord.ButtonStyle.danger, row=3)
+    async def reset_category(self, interaction: discord.Interaction, _: discord.ui.Button):
+        if self.category is None:
+            await interaction.response.send_message("Choose a category first.", ephemeral=True, allowed_mentions=safe_allowed_mentions())
+            return
+        await interaction.response.edit_message(
+            content=f"Confirm reset of all editable settings in `{self.category}` to environment defaults.",
+            embed=None, view=DashboardConfirmResetView(self.bot, self.category, self.snapshot_revisions), allowed_mentions=safe_allowed_mentions(),
+        )
 
     @discord.ui.button(label="Back", style=discord.ButtonStyle.secondary, row=3)
     async def back(self, interaction: discord.Interaction, _: discord.ui.Button):
@@ -291,21 +347,32 @@ class DashboardSettingSelect(discord.ui.Select, DashboardAuthorizationMixin):
         if not await self._authorized(interaction):
             return
         self.view_ref.selected = self.values[0]
+        self.view_ref.selected_revision = self.bot.runtime_settings.revision(self.view_ref.selected)
         await interaction.response.edit_message(embed=dashboard_embed(self.bot, self.category, self.view_ref.selected), view=self.view_ref)
 
 
 class DashboardConfirmResetView(discord.ui.View, DashboardAuthorizationMixin):
-    def __init__(self, bot: "MimiBot"):
+    def __init__(self, bot: "MimiBot", category: str | None = None, expected_revisions: dict[str, int] | None = None):
         super().__init__(timeout=60)
         self.bot = bot
+        self.category = category
+        self.expected_revisions = expected_revisions or {}
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         return await self._authorized(interaction)
 
     @discord.ui.button(label="Confirm reset all", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction: discord.Interaction, _: discord.ui.Button):
-        self.bot.runtime_settings.reset_all()
-        await interaction.response.edit_message(content="All editable overrides were reset to environment defaults.", embed=dashboard_embed(self.bot), view=DashboardView(self.bot), allowed_mentions=safe_allowed_mentions())
+        if any(self.bot.runtime_settings.revision(key) != revision for key, revision in self.expected_revisions.items()):
+            await interaction.response.edit_message(content="This dashboard was stale and was not applied. Reopen `/dashboard` to refresh it.", embed=dashboard_embed(self.bot, self.category), view=DashboardView(self.bot, self.category), allowed_mentions=safe_allowed_mentions())
+            return
+        if self.category is None:
+            self.bot.runtime_settings.reset_all(changed_by=interaction.user.id)
+            content = "All editable overrides were reset to environment defaults."
+        else:
+            self.bot.runtime_settings.reset_category(self.category, changed_by=interaction.user.id)
+            content = f"Editable overrides in `{self.category}` were reset to environment defaults."
+        await interaction.response.edit_message(content=content, embed=dashboard_embed(self.bot, self.category), view=DashboardView(self.bot, self.category), allowed_mentions=safe_allowed_mentions())
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction: discord.Interaction, _: discord.ui.Button):
@@ -326,7 +393,7 @@ class MimiBot(commands.Bot):
         self.vision_enabled = settings.vision_default
         self.runtime_settings = RuntimeSettings(settings, self.store, on_change=self._runtime_setting_changed)
         self.provider = AIProviderRouter(settings)
-        self.personality = load_personality(settings.base_dir)
+        self.personality = settings.personality_prompt or load_personality(settings.base_dir)
         self.started_at = time.monotonic()
         self.histories: dict[tuple[int, int, int], deque[dict]] = defaultdict(lambda: deque(maxlen=settings.max_context_messages))
         self.user_cooldowns: dict[int, float] = {}
@@ -349,7 +416,9 @@ class MimiBot(commands.Bot):
         self.multi_bot_seen_message_order: deque[int] = deque(maxlen=200)
 
     def _runtime_setting_changed(self, key: str) -> None:
-        if key == "vision_default":
+        if key == "personality_prompt":
+            self.personality = str(self.settings.personality_prompt)
+        elif key == "vision_default":
             self.vision_enabled = bool(self.settings.vision_default)
         elif key == "reaction_max_file_bytes" and hasattr(self, "reaction_library"):
             self.reaction_library.max_file_bytes = self.settings.reaction_max_file_bytes
@@ -360,16 +429,22 @@ class MimiBot(commands.Bot):
             )
         elif key == "inactivity_enabled" and hasattr(self, "inactivity_check"):
             if self.settings.inactivity_enabled and self.is_ready() and not self.inactivity_check.is_running():
+                self.inactivity_check.change_interval(seconds=self.settings.inactivity_check_interval_seconds)
                 self.inactivity_check.start()
             elif not self.settings.inactivity_enabled and self.inactivity_check.is_running():
                 self.inactivity_check.cancel()
         elif key == "multi_bot_enabled" and hasattr(self, "multi_bot_check"):
             if self.settings.multi_bot_enabled and self.is_ready() and not self.multi_bot_check.is_running():
                 self.multi_bot_last_activity_at = utc_now()
+                self.multi_bot_check.change_interval(seconds=self.settings.multi_bot_check_interval_seconds)
                 self.multi_bot_check.start()
             elif not self.settings.multi_bot_enabled and self.multi_bot_check.is_running():
                 self.multi_bot_check.cancel()
                 self.multi_bot_conversation = None
+        elif key == "multi_bot_check_interval_seconds" and hasattr(self, "multi_bot_check"):
+            self.multi_bot_check.change_interval(seconds=self.settings.multi_bot_check_interval_seconds)
+        elif key == "inactivity_check_interval_seconds" and hasattr(self, "inactivity_check"):
+            self.inactivity_check.change_interval(seconds=self.settings.inactivity_check_interval_seconds)
 
     def local_now(self) -> datetime:
         try:
@@ -433,9 +508,11 @@ class MimiBot(commands.Bot):
     async def on_ready(self):
         log.info("Ready as %s in %s guilds", self.user, len(self.guilds))
         if self.settings.inactivity_enabled and not self.inactivity_check.is_running():
+            self.inactivity_check.change_interval(seconds=self.settings.inactivity_check_interval_seconds)
             self.inactivity_check.start()
         if self.settings.multi_bot_enabled and not self.multi_bot_check.is_running():
             self.multi_bot_last_activity_at = utc_now()
+            self.multi_bot_check.change_interval(seconds=self.settings.multi_bot_check_interval_seconds)
             self.multi_bot_check.start()
 
     @tasks.loop(minutes=1)
@@ -768,7 +845,7 @@ class MimiBot(commands.Bot):
             return None
         for attachment in message.attachments:
             is_image = (attachment.content_type or "").startswith("image/") or Path(attachment.filename).suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".webp"}
-            if attachment.size <= 5 * 1024 * 1024 and is_image:
+            if attachment.size <= self.settings.vision_max_attachment_bytes and is_image:
                 if attachment.url.startswith(("https://cdn.discordapp.com/", "https://media.discordapp.net/")):
                     return attachment.url
         return None
@@ -800,7 +877,7 @@ class MimiBot(commands.Bot):
             fact_words = set(re.findall(r"[a-z0-9']{3,}", row["fact"].lower()))
             if words & fact_words:
                 selected.append(row)
-        return selected[-4:]
+        return selected[-self.settings.max_relevant_memories:]
 
     def _history_key(self, message: discord.Message) -> tuple[int, int, int]:
         return (message.guild.id if message.guild else 0, message.channel.id, message.author.id)
