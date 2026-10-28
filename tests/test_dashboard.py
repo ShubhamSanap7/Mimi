@@ -106,8 +106,31 @@ def test_dashboard_marks_startup_captured_settings_and_allows_empty_prompt_reset
     _, store, registry = make_registry(tmp_path)
     assert registry.specs["max_retries"].live is False
     assert registry.specs["request_timeout_seconds"].live is False
+    assert registry.specs["groq_fallback_enabled"].live is False
     assert registry.set("personality_prompt", "") == ""
     assert registry.value("personality_prompt") == ""
+    store.close()
+
+
+def test_dashboard_validates_inactivity_template_placeholders(tmp_path: Path):
+    _, store, registry = make_registry(tmp_path)
+    assert registry.set("inactivity_template", "Where are you, {owner}?") == "Where are you, {owner}?"
+    with pytest.raises(ValueError):
+        registry.set("inactivity_template", "{secret}")
+    with pytest.raises(ValueError):
+        registry.set("inactivity_template", "{")
+    store.close()
+
+
+def test_stale_reset_does_not_delete_newer_override(tmp_path: Path):
+    _, store, registry = make_registry(tmp_path)
+    registry.set("reaction_probability", 0.8)
+    revision = registry.revision("reaction_probability")
+    registry.set("reaction_probability", 0.6)
+    with pytest.raises(ValueError):
+        registry.reset("reaction_probability", expected_revision=revision)
+    assert registry.value("reaction_probability") == 0.6
+    assert registry.is_overridden("reaction_probability")
     store.close()
 
 

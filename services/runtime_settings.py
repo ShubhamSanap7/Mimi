@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from collections import defaultdict
+import string
 from typing import Any, Callable
 
 from config.settings import Settings
@@ -66,7 +67,7 @@ def _specs() -> tuple[SettingSpec, ...]:
         SettingSpec("primary_model", "AI and token budgets", "Primary model", "Configured xKiro model identifier.", "str", live=True),
         SettingSpec("fallback_model", "AI and token budgets", "Fallback model", "Configured fallback model identifier.", "str", live=True),
         SettingSpec("groq_model", "AI and token budgets", "Groq fallback model", "Model used only after a retryable xKiro failure.", "str", live=True),
-        SettingSpec("groq_fallback_enabled", "AI and token budgets", "Groq fallback enabled", "Enable the Groq route when a key is configured; no key is ever created by this control.", "bool"),
+        SettingSpec("groq_fallback_enabled", "AI and token budgets", "Groq fallback enabled", "Enable the Groq route when a key is configured; provider client creation is startup-bound, so restart is required.", "bool", live=False),
         SettingSpec("groq_supports_vision", "AI and token budgets", "Groq vision fallback", "Allow image payloads on Groq only when the selected model is known to support vision.", "bool"),
         SettingSpec("max_web_searches_per_day", "AI and token budgets", "Daily web-search limit", "Maximum optional searches per local day.", "int", 0, 1000),
         SettingSpec("max_vision_requests_per_day", "AI and token budgets", "Daily vision limit", "Maximum optional vision requests per local day.", "int", 0, 1000),
@@ -113,6 +114,7 @@ class RuntimeSettings:
         self.on_change = on_change
         self.specs = {spec.key: spec for spec in _specs()}
         self.revisions: dict[str, int] = defaultdict(int)
+        self._override_keys: set[str] = set()
         self.environment_defaults = {key: getattr(settings, key) for key in self.specs if hasattr(settings, key)}
         self._load_persisted()
 
@@ -156,9 +158,20 @@ class RuntimeSettings:
                 raise ValueError(f"must contain at least {spec.minimum} characters")
             if spec.maximum is not None and len(result) > spec.maximum:
                 raise ValueError(f"must contain at most {spec.maximum} characters")
+            if spec.key == "inactivity_template":
+                try:
+                    fields = {field for _, field, _, _ in string.Formatter().parse(result) if field}
+                except ValueError as exc:
+                    raise ValueError("template syntax is invalid") from exc
+                if not fields <= {"owner"}:
+                    raise ValueError("only the {owner} placeholder is supported")
+            if spec.choices and result not in spec.choices:
+                raise ValueError(f"value must be one of: {', '.join(spec.choices)}")
             return result
         else:
             result = value
+        if spec.choices and result not in spec.choices:
+            raise ValueError(f"value must be one of: {', '.join(spec.choices)}")
         if spec.minimum is not None and result < spec.minimum:
             raise ValueError(f"must be at least {spec.minimum}")
         if spec.maximum is not None and result > spec.maximum:
@@ -166,12 +179,15 @@ class RuntimeSettings:
         return result
 
     def _load_persisted(self) -> None:
-        for key, raw in self.store.runtime_overrides().items():
+        overrides = self.store.runtime_overrides()
+        self._override_keys = set(overrides)
+        for key, raw in overrides.items():
             if key in self.specs and self.specs[key].editable:
                 try:
                     self._apply(key, raw, persist=False)
                 except (TypeError, ValueError):
                     self.store.delete_runtime_override(key)
+                    self._override_keys.discard(key)
 
     def _apply(self, key: str, value: Any, *, persist: bool, changed_by: int = 0,
                expected_revision: int | None = None) -> Any:
@@ -185,6 +201,7 @@ class RuntimeSettings:
         if persist:
             stored = sorted(coerced) if isinstance(coerced, (set, frozenset)) else coerced
             self.store.set_runtime_override(key, stored)
+            self._override_keys.add(key)
         if changed_by and old_value != coerced:
             def audit_value(value: Any) -> Any:
                 if key == "personality_prompt":
@@ -207,18 +224,24 @@ class RuntimeSettings:
     def reset(self, key: str, *, changed_by: int = 0, expected_revision: int | None = None) -> Any:
         if key not in self.specs or not self.specs[key].editable:
             raise ValueError("this setting cannot be reset from the dashboard")
+        if expected_revision is not None and self.revisions[key] != expected_revision:
+            raise ValueError("This dashboard value changed elsewhere; refresh before saving.")
+        value = self._apply(key, self.environment_defaults[key], persist=False, changed_by=changed_by, expected_revision=expected_revision)
         self.store.delete_runtime_override(key)
-        return self._apply(key, self.environment_defaults[key], persist=False, changed_by=changed_by, expected_revision=expected_revision)
+        self._override_keys.discard(key)
+        return value
 
     def reset_category(self, category: str, *, changed_by: int = 0) -> None:
         keys = [spec.key for spec in self.specs.values() if spec.category == category and spec.editable]
         self.store.clear_runtime_overrides(keys)
+        self._override_keys.difference_update(keys)
         for key in keys:
             self._apply(key, self.environment_defaults[key], persist=False, changed_by=changed_by)
 
     def reset_all(self, *, changed_by: int = 0) -> None:
         keys = [spec.key for spec in self.specs.values() if spec.editable]
         self.store.clear_runtime_overrides(keys)
+        self._override_keys.difference_update(keys)
         for key in keys:
             self._apply(key, self.environment_defaults[key], persist=False, changed_by=changed_by)
 
@@ -231,7 +254,7 @@ class RuntimeSettings:
         return self.revisions[key]
 
     def is_overridden(self, key: str) -> bool:
-        return key in self.store.runtime_overrides()
+        return key in self._override_keys
 
     def specs_for(self, category: str) -> list[SettingSpec]:
         return [spec for spec in self.specs.values() if spec.category == category]

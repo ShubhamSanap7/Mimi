@@ -116,7 +116,9 @@ class XKiroProvider:
                 await asyncio.sleep(0.5 * (2**attempt))
                 continue
             if last_error:
-                raise last_error from exc
+                # Do not reference an exception variable outside its except block:
+                # Python clears that target after the block exits.
+                raise last_error from last_error
         raise last_error or ProviderError("xKiro request failed", category="unknown")
 
     async def list_models(self) -> list[str]:

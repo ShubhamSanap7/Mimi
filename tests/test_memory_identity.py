@@ -7,7 +7,7 @@ from config.settings import Settings
 from database.store import Store
 from main import MimiBot
 from services.capabilities import build_capabilities, capability_prompt
-from services.memory_intent import detect_memory_intent
+from services.memory_intent import detect_memory_intent, memory_key_for_fact
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,6 +19,9 @@ def test_explicit_memory_intent_is_distinct_from_ordinary_fact():
     assert intent and intent.action == "save" and "birthday" in intent.fact
     assert detect_memory_intent("Do you remember my birthday?") is None
     assert detect_memory_intent("Forget that fact")
+    assert detect_memory_intent("Forget my old birthday").action == "forget"
+    assert detect_memory_intent("Update the birthday I told you earlier").ambiguous
+    assert memory_key_for_fact("my birthday is 14 March", 1) == "subject:1:birthday"
 
 
 def test_explicit_memory_save_is_persisted_and_visible(tmp_path: Path):
@@ -87,6 +90,17 @@ def test_named_server_member_memory_gets_stable_discord_identity(tmp_path: Path)
     assert subject == "77"
     assert "Discord user ID 77" in fact
     asyncio.run(bot.close())
+
+
+def test_explicit_fact_updates_existing_key_and_deduplicates(tmp_path: Path):
+    store = Store(tmp_path / "memory.sqlite3")
+    first = store.add_memory(1, 10, "my birthday is 14 March", memory_key="subject:1:birthday", subject_id=1, category="birthday")
+    second = store.add_memory(1, 10, "my birthday is 20 March", memory_key="subject:1:birthday", subject_id=1, category="birthday")
+    rows = store.list_memories(1, 10, 30)
+    assert first == second
+    assert len(rows) == 1
+    assert rows[0]["fact"] == "my birthday is 20 March"
+    store.close()
 
 
 def test_capability_registry_marks_optional_features_unavailable(tmp_path: Path):

@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 import threading
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -23,7 +24,9 @@ class Store:
             CREATE TABLE IF NOT EXISTS memories (
               id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, guild_id INTEGER NOT NULL,
               fact TEXT NOT NULL, fingerprint TEXT NOT NULL, created_at TEXT NOT NULL,
-              last_used_at TEXT NOT NULL, UNIQUE(user_id, guild_id, fingerprint)
+              last_used_at TEXT NOT NULL, memory_key TEXT NOT NULL DEFAULT '',
+              subject_id INTEGER, subject_name TEXT NOT NULL DEFAULT '', category TEXT NOT NULL DEFAULT '',
+              UNIQUE(user_id, guild_id, fingerprint)
             );
             CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(user_id, guild_id);
             CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -55,22 +58,91 @@ class Store:
               opening_key TEXT NOT NULL, topic_key TEXT NOT NULL, opened_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_multi_bot_topics_scope ON multi_bot_topics(channel_id, participant_id, opened_at);
+            CREATE TABLE IF NOT EXISTS pending_tasks (
+              task_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, guild_id INTEGER NOT NULL,
+              channel_id INTEGER NOT NULL, capability TEXT NOT NULL, arguments TEXT NOT NULL,
+              missing TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL,
+              expires_at TEXT NOT NULL, idempotency_key TEXT NOT NULL UNIQUE,
+              confirmation_required INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_pending_tasks_scope ON pending_tasks(user_id, guild_id, channel_id, status, expires_at);
+            CREATE TABLE IF NOT EXISTS scheduled_tasks (
+              task_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, guild_id INTEGER NOT NULL,
+              channel_id INTEGER NOT NULL, content TEXT NOT NULL, due_at TEXT NOT NULL,
+              status TEXT NOT NULL, created_at TEXT NOT NULL, delivered_at TEXT,
+              idempotency_key TEXT NOT NULL UNIQUE
+            );
+            CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_due ON scheduled_tasks(status, due_at);
+            CREATE TABLE IF NOT EXISTS agent_executions (
+              idempotency_key TEXT PRIMARY KEY, capability TEXT NOT NULL,
+              created_at TEXT NOT NULL
+            );
             """)
-            try:
+            self._migrate_schema()
+
+    def _migrate_schema(self) -> None:
+        version = int(self.conn.execute("PRAGMA user_version").fetchone()[0])
+        if version < 1:
+            columns = {str(row[1]) for row in self.conn.execute("PRAGMA table_info(owner_activity)")}
+            if "last_ping_at" not in columns:
                 self.conn.execute("ALTER TABLE owner_activity ADD COLUMN last_ping_at TEXT")
-            except sqlite3.OperationalError:
-                pass
+            self.conn.execute("PRAGMA user_version=1")
+            self.conn.commit()
+            version = 1
+        if version < 2:
+            columns = {str(row[1]) for row in self.conn.execute("PRAGMA table_info(memories)")}
+            additions = {
+                "memory_key": "TEXT NOT NULL DEFAULT ''",
+                "subject_id": "INTEGER",
+                "subject_name": "TEXT NOT NULL DEFAULT ''",
+                "category": "TEXT NOT NULL DEFAULT ''",
+            }
+            for name, declaration in additions.items():
+                if name not in columns:
+                    self.conn.execute(f"ALTER TABLE memories ADD COLUMN {name} {declaration}")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_key ON memories(user_id, guild_id, memory_key)")
+            self.conn.execute("PRAGMA user_version=2")
+            self.conn.commit()
+            version = 2
+        if version < 3:
+            self.conn.execute("PRAGMA user_version=3")
+            self.conn.commit()
 
     def close(self) -> None:
         with self.lock:
             self.conn.close()
 
-    def add_memory(self, user_id: int, guild_id: int, fact: str) -> int:
+    def add_memory(self, user_id: int, guild_id: int, fact: str, *, memory_key: str = "",
+                   subject_id: int | None = None, subject_name: str = "", category: str = "") -> int:
         fingerprint = " ".join(fact.lower().split())[:500]
         with self.lock:
-            self.conn.execute("""INSERT INTO memories(user_id,guild_id,fact,fingerprint,created_at,last_used_at)
-                VALUES(?,?,?,?,?,?) ON CONFLICT(user_id,guild_id,fingerprint) DO UPDATE SET fact=excluded.fact,last_used_at=excluded.last_used_at""",
-                (user_id, guild_id, fact[:500], fingerprint, now_iso(), now_iso()))
+            timestamp = now_iso()
+            existing = None
+            if memory_key:
+                existing = self.conn.execute(
+                    "SELECT id FROM memories WHERE user_id=? AND guild_id=? AND memory_key=? ORDER BY id LIMIT 1",
+                    (user_id, guild_id, memory_key),
+                ).fetchone()
+            if existing is not None:
+                existing_id = int(existing["id"])
+                self.conn.execute(
+                    "DELETE FROM memories WHERE user_id=? AND guild_id=? AND memory_key=? AND id<>?",
+                    (user_id, guild_id, memory_key, existing_id),
+                )
+                self.conn.execute(
+                    "DELETE FROM memories WHERE user_id=? AND guild_id=? AND fingerprint=? AND id<>?",
+                    (user_id, guild_id, fingerprint, existing_id),
+                )
+                self.conn.execute(
+                    "UPDATE memories SET fact=?, fingerprint=?, last_used_at=?, subject_id=?, subject_name=?, category=? WHERE id=?",
+                    (fact[:500], fingerprint, timestamp, subject_id, subject_name[:100], category[:80], existing_id),
+                )
+            else:
+                self.conn.execute("""INSERT INTO memories(user_id,guild_id,fact,fingerprint,created_at,last_used_at,memory_key,subject_id,subject_name,category)
+                    VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id,guild_id,fingerprint) DO UPDATE SET fact=excluded.fact,last_used_at=excluded.last_used_at,
+                    memory_key=CASE WHEN excluded.memory_key<>'' THEN excluded.memory_key ELSE memories.memory_key END,
+                    subject_id=COALESCE(excluded.subject_id, memories.subject_id), subject_name=excluded.subject_name, category=excluded.category""",
+                    (user_id, guild_id, fact[:500], fingerprint, timestamp, timestamp, memory_key[:120], subject_id, subject_name[:100], category[:80]))
             self.conn.commit()
             row = self.conn.execute(
                 "SELECT id FROM memories WHERE user_id=? AND guild_id=? AND fingerprint=?",
@@ -80,23 +152,56 @@ class Store:
 
     def find_memory_matches(self, user_id: int, guild_id: int, query: str) -> list[sqlite3.Row]:
         normalized = " ".join(query.lower().split())
+        exact_tokens = {token for token in normalized.split() if len(token) >= 3 and token not in {"the", "that", "this", "old", "memory", "fact"}}
         with self.lock:
             rows = self.conn.execute(
                 "SELECT * FROM memories WHERE user_id=? AND guild_id=? ORDER BY id",
                 (user_id, guild_id),
             ).fetchall()
-        return [row for row in rows if normalized and normalized in " ".join(row["fact"].lower().split())]
+        exact = [row for row in rows if normalized and normalized in " ".join(row["fact"].lower().split())]
+        if exact or not exact_tokens:
+            return exact
+        scored = []
+        for row in rows:
+            fact_tokens = set(re.findall(r"[a-z0-9']{3,}", row["fact"].lower()))
+            overlap = len(exact_tokens & fact_tokens)
+            if overlap:
+                scored.append((overlap, int(row["id"]), row))
+        scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        if not scored:
+            return []
+        best = scored[0][0]
+        return [row for score, _, row in scored if score == best]
 
-    def list_memories(self, user_id: int, guild_id: int, expiry_days: int, protected_user_ids: frozenset[int] = frozenset()) -> list[sqlite3.Row]:
+    def list_memories(self, user_id: int, guild_id: int, expiry_days: int,
+                      protected_user_ids: frozenset[int] = frozenset(), *, limit: int | None = None,
+                      offset: int = 0) -> list[sqlite3.Row]:
         with self.lock:
-            cutoff = (datetime.now(timezone.utc) - timedelta(days=expiry_days)).isoformat()
+            query = "SELECT * FROM memories WHERE user_id=? AND guild_id=? ORDER BY id"
+            params: list[object] = [user_id, guild_id]
+            if limit is not None:
+                query += " LIMIT ? OFFSET ?"
+                params.extend([max(1, min(50, limit)), max(0, offset)])
+            return list(self.conn.execute(query, params))
+
+    def count_memories(self, user_id: int, guild_id: int) -> int:
+        with self.lock:
+            return int(self.conn.execute("SELECT COUNT(*) FROM memories WHERE user_id=? AND guild_id=?", (user_id, guild_id)).fetchone()[0])
+
+    def sweep_expired_memories(self, expiry_days: int, protected_user_ids: frozenset[int] = frozenset()) -> int:
+        """Perform expiry cleanup explicitly; read-only memory views do not delete data."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=expiry_days)).isoformat()
+        with self.lock:
             if protected_user_ids:
                 marks = ",".join("?" for _ in protected_user_ids)
-                self.conn.execute(f"DELETE FROM memories WHERE last_used_at < ? AND user_id NOT IN ({marks})", (cutoff, *protected_user_ids))
+                cur = self.conn.execute(
+                    f"DELETE FROM memories WHERE last_used_at < ? AND user_id NOT IN ({marks})",
+                    (cutoff, *protected_user_ids),
+                )
             else:
-                self.conn.execute("DELETE FROM memories WHERE last_used_at < ?", (cutoff,))
+                cur = self.conn.execute("DELETE FROM memories WHERE last_used_at < ?", (cutoff,))
             self.conn.commit()
-            return list(self.conn.execute("SELECT * FROM memories WHERE user_id=? AND guild_id=? ORDER BY id", (user_id, guild_id)))
+            return cur.rowcount
 
     def touch(self, ids: list[int]) -> None:
         if not ids: return
@@ -167,6 +272,91 @@ class Store:
                 "SELECT changed_by,changed_at,setting_key,old_value,new_value FROM setting_audit ORDER BY id DESC LIMIT ?",
                 (max(1, min(100, limit)),),
             ))
+
+    def create_pending_task(self, task_id: str, user_id: int, guild_id: int, channel_id: int,
+                            capability: str, arguments: dict, missing: list[str], expires_at: str,
+                            idempotency_key: str) -> bool:
+        with self.lock:
+            try:
+                self.conn.execute(
+                    "INSERT INTO pending_tasks(task_id,user_id,guild_id,channel_id,capability,arguments,missing,status,created_at,expires_at,idempotency_key) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                    (task_id, user_id, guild_id, channel_id, capability, json.dumps(arguments, ensure_ascii=False),
+                     json.dumps(missing), "pending", now_iso(), expires_at, idempotency_key),
+                )
+                self.conn.commit()
+                return True
+            except sqlite3.IntegrityError:
+                return False
+
+    def pending_task(self, user_id: int, guild_id: int, channel_id: int) -> sqlite3.Row | None:
+        with self.lock:
+            return self.conn.execute(
+                "SELECT * FROM pending_tasks WHERE user_id=? AND guild_id=? AND channel_id=? AND status='pending' AND expires_at>? ORDER BY created_at DESC LIMIT 1",
+                (user_id, guild_id, channel_id, now_iso()),
+            ).fetchone()
+
+    def update_pending_task(self, task_id: str, arguments: dict, missing: list[str]) -> bool:
+        with self.lock:
+            cur = self.conn.execute(
+                "UPDATE pending_tasks SET arguments=?, missing=? WHERE task_id=? AND status='pending'",
+                (json.dumps(arguments, ensure_ascii=False), json.dumps(missing), task_id),
+            )
+            self.conn.commit()
+            return cur.rowcount > 0
+
+    def finish_pending_task(self, task_id: str, status: str = "completed") -> bool:
+        with self.lock:
+            cur = self.conn.execute("UPDATE pending_tasks SET status=? WHERE task_id=? AND status='pending'", (status, task_id))
+            self.conn.commit()
+            return cur.rowcount > 0
+
+    def sweep_pending_tasks(self) -> int:
+        with self.lock:
+            cur = self.conn.execute("UPDATE pending_tasks SET status='expired' WHERE status='pending' AND expires_at<=?", (now_iso(),))
+            self.conn.commit()
+            return cur.rowcount
+
+    def count_scheduled_tasks(self, user_id: int, guild_id: int) -> int:
+        with self.lock:
+            return int(self.conn.execute("SELECT COUNT(*) FROM scheduled_tasks WHERE user_id=? AND guild_id=? AND status='pending'", (user_id, guild_id)).fetchone()[0])
+
+    def create_scheduled_task(self, task_id: str, user_id: int, guild_id: int, channel_id: int,
+                              content: str, due_at: str, idempotency_key: str) -> bool:
+        with self.lock:
+            try:
+                self.conn.execute(
+                    "INSERT INTO scheduled_tasks(task_id,user_id,guild_id,channel_id,content,due_at,status,created_at,idempotency_key) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (task_id, user_id, guild_id, channel_id, content[:1900], due_at, "pending", now_iso(), idempotency_key),
+                )
+                self.conn.commit()
+                return True
+            except sqlite3.IntegrityError:
+                return False
+
+    def due_scheduled_tasks(self, limit: int = 20) -> list[sqlite3.Row]:
+        with self.lock:
+            return list(self.conn.execute(
+                "SELECT * FROM scheduled_tasks WHERE status='pending' AND due_at<=? ORDER BY due_at LIMIT ?",
+                (now_iso(), max(1, min(20, limit))),
+            ))
+
+    def mark_scheduled_task(self, task_id: str, status: str) -> bool:
+        with self.lock:
+            cur = self.conn.execute(
+                "UPDATE scheduled_tasks SET status=?, delivered_at=? WHERE task_id=? AND status='pending'",
+                (status, now_iso() if status == "sent" else None, task_id),
+            )
+            self.conn.commit()
+            return cur.rowcount > 0
+
+    def claim_agent_execution(self, idempotency_key: str, capability: str) -> bool:
+        with self.lock:
+            try:
+                self.conn.execute("INSERT INTO agent_executions(idempotency_key,capability,created_at) VALUES(?,?,?)", (idempotency_key, capability, now_iso()))
+                self.conn.commit()
+                return True
+            except sqlite3.IntegrityError:
+                return False
 
     def record_multi_bot_topic(self, channel_id: int, participant_id: int, opening_key: str, topic_key: str, opened_at: str) -> None:
         with self.lock:

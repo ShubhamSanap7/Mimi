@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import sqlite3
 
 from PIL import Image
 
@@ -25,6 +26,7 @@ def test_missing_secrets(tmp_path: Path, monkeypatch):
 
 def test_memory_isolation_expiry_and_update(tmp_path: Path):
     store = Store(tmp_path / "data.sqlite3")
+    assert store.conn.execute("PRAGMA user_version").fetchone()[0] == 3
     store.add_memory(1, 10, "I like tea")
     store.add_memory(1, 10, "I like tea")
     store.add_memory(2, 10, "I like coffee")
@@ -35,9 +37,36 @@ def test_memory_isolation_expiry_and_update(tmp_path: Path):
     store.conn.execute("UPDATE memories SET last_used_at=? WHERE user_id IN (1,2)", (old,))
     store.conn.commit()
     assert store.list_memories(1, 10, 30, frozenset({1}))
+    assert store.list_memories(2, 10, 30, frozenset({1}))
+    assert store.sweep_expired_memories(30, frozenset({1})) == 1
     assert store.list_memories(2, 10, 30, frozenset({1})) == []
     assert store.delete_all(1, 10) == 1
     assert store.list_memories(1, 10, 30, frozenset({1})) == []
+    store.close()
+
+
+def test_memory_schema_migrates_old_database_without_losing_rows(tmp_path: Path):
+    path = tmp_path / "old.sqlite3"
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE memories (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, guild_id INTEGER NOT NULL, fact TEXT NOT NULL, fingerprint TEXT NOT NULL, created_at TEXT NOT NULL, last_used_at TEXT NOT NULL, UNIQUE(user_id,guild_id,fingerprint))")
+    conn.execute("INSERT INTO memories(user_id,guild_id,fact,fingerprint,created_at,last_used_at) VALUES(1,2,'old fact','old fact','2026-01-01','2026-01-01')")
+    conn.commit()
+    conn.close()
+    store = Store(path)
+    assert store.conn.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert store.list_memories(1, 2, 30)[0]["fact"] == "old fact"
+    assert "memory_key" in {row[1] for row in store.conn.execute("PRAGMA table_info(memories)")}
+    store.close()
+
+
+def test_memory_pagination_and_scoped_count(tmp_path: Path):
+    store = Store(tmp_path / "pages.sqlite3")
+    for index in range(25):
+        store.add_memory(1, 10, f"fact {index}")
+    assert store.count_memories(1, 10) == 25
+    assert len(store.list_memories(1, 10, 30, limit=10, offset=0)) == 10
+    assert len(store.list_memories(1, 10, 30, limit=10, offset=20)) == 5
+    assert store.count_memories(2, 10) == 0
     store.close()
 
 

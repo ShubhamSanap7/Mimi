@@ -5,6 +5,7 @@ from hashlib import sha256
 import json
 from pathlib import Path
 import re
+import random
 from typing import Iterable, Mapping, TypedDict
 
 from PIL import Image, UnidentifiedImageError
@@ -21,7 +22,7 @@ MEDIA_WORDS = r"\b(gif|reaction|meme|image|picture|photo|pic)\b"
 # These rules are intentionally local and conservative. They are used both for
 # explicit media requests and for occasional contextual reactions after a text
 # reply; neither path needs another model call.
-CATEGORY_PATTERNS: tuple[tuple[str, str], ...] = (
+CATEGORY_PATTERN_SOURCES: tuple[tuple[str, str], ...] = (
     ("shock", r"\b(shock(?:ed)?|surpris(?:e|ed|ing)|unexpected|wtf|no way|seriously|you did what)\b"),
     ("excited", r"\b(excited|exciting|excitement|hype|can't wait|cannot wait|let's go|lets go)\b"),
     ("happy", r"\b(happy|glad|yay|awesome|great|congrats?|won|joy|thank(?:s| you))\b"),
@@ -78,6 +79,10 @@ CATEGORY_PATTERNS: tuple[tuple[str, str], ...] = (
     ("betrayal", r"\b(betray(?:al|ed)|backstab)\b"),
     ("gaming_facepalm", r"\b(gaming facepalm|throwing the game|critical fail)\b"),
 )
+
+# Compile once at import time. Reaction matching runs on every eligible reply,
+# so compiling these expressions inside each call needlessly burns CPU.
+CATEGORY_PATTERNS = tuple((name, re.compile(pattern, re.IGNORECASE)) for name, pattern in CATEGORY_PATTERN_SOURCES)
 
 AUTOMATIC_SUPPRESS_PATTERN = re.compile(
     r"(?i)(?:\b(?:suicide|suicidal|self[- ]?harm|kill myself|want to die|overdose|abuse|assault|rape|doxx|"
@@ -159,6 +164,23 @@ class ReactionLibrary:
         self.root = root
         self.max_file_bytes = max_file_bytes
         self._root_resolved = root.resolve(strict=False)
+        self._scan_cache: ScanResult | None = None
+        self._scan_cache_max_bytes = max_file_bytes
+        self._manifest_metadata_cache: dict[str, Mapping[str, object]] | None = None
+        self._manifest_signature: tuple[int, int] | None = None
+
+    def refresh(self) -> None:
+        """Invalidate the validated asset cache after an operator changes files."""
+        self._scan_cache = None
+        self._manifest_metadata_cache = None
+        self._manifest_signature = None
+
+    def _manifest_file_signature(self) -> tuple[int, int] | None:
+        try:
+            stat = (self.root / MANIFEST_FILENAME).stat()
+            return stat.st_mtime_ns, stat.st_size
+        except OSError:
+            return None
 
     def safe_asset_path(self, relative_path: str | Path) -> Path | None:
         """Resolve a manifest/path value only when it stays under the library root."""
@@ -276,12 +298,17 @@ class ReactionLibrary:
         )
 
     def scan(self, metadata: Mapping[str, Mapping[str, object]] | None = None) -> ScanResult:
+        if self._scan_cache is not None and self._scan_cache_max_bytes == self.max_file_bytes:
+            return self._scan_cache
         assets: list[ReactionAsset] = []
         invalid: list[dict[str, object]] = []
         duplicates: dict[str, list[str]] = {}
         seen: dict[str, str] = {}
         if not self.root.is_dir():
-            return {"assets": assets, "invalid": invalid, "duplicates": duplicates}
+            result = {"assets": assets, "invalid": invalid, "duplicates": duplicates}
+            self._scan_cache = result
+            self._scan_cache_max_bytes = self.max_file_bytes
+            return result
         for path in sorted(self.root.rglob("*")):
             if not path.is_file() or path.name in {MANIFEST_FILENAME, "manifest.json.tmp"}:
                 continue
@@ -298,7 +325,10 @@ class ReactionLibrary:
                 continue
             seen[digest] = relative_path
             assets.append(self._asset_from_result(result, metadata))
-        return {"assets": assets, "invalid": invalid, "duplicates": duplicates}
+        result = {"assets": assets, "invalid": invalid, "duplicates": duplicates}
+        self._scan_cache = result
+        self._scan_cache_max_bytes = self.max_file_bytes
+        return result
 
     def discover_assets(self, metadata: Mapping[str, Mapping[str, object]] | None = None) -> list[ReactionAsset]:
         return list(self.scan(metadata)["assets"])
@@ -314,15 +344,22 @@ class ReactionLibrary:
             return None
 
     def manifest_metadata(self) -> dict[str, Mapping[str, object]]:
+        signature = self._manifest_file_signature()
+        if self._manifest_metadata_cache is not None and signature == self._manifest_signature:
+            return dict(self._manifest_metadata_cache)
         payload = self.load_manifest() or {}
         result: dict[str, Mapping[str, object]] = {}
         raw_assets = payload.get("assets", [])
         if not isinstance(raw_assets, list):
-            return result
+            self._manifest_metadata_cache = result
+            self._manifest_signature = signature
+            return dict(result)
         for item in raw_assets:
             if isinstance(item, dict) and isinstance(item.get("path"), str):
                 result[item["path"]] = item
-        return result
+        self._manifest_metadata_cache = result
+        self._manifest_signature = signature
+        return dict(result)
 
     def build_manifest(self, metadata: Mapping[str, Mapping[str, object]] | None = None) -> dict[str, object]:
         metadata = metadata or self.manifest_metadata()
@@ -351,7 +388,7 @@ class ReactionLibrary:
     @staticmethod
     def infer_category(text: str) -> str | None:
         lowered = text.lower()
-        return next((category for category, pattern in CATEGORY_PATTERNS if re.search(pattern, lowered)), None)
+        return next((category for category, pattern in CATEGORY_PATTERNS if pattern.search(lowered)), None)
 
     @staticmethod
     def automatic_category(text: str, answer: str = "") -> str | None:
@@ -389,7 +426,7 @@ class ReactionLibrary:
         pattern = next((pattern for name, pattern in CATEGORY_PATTERNS if name == category), None)
         if pattern is None:
             return False
-        for match in re.finditer(pattern, text, re.IGNORECASE):
+        for match in pattern.finditer(text):
             prefix = text[max(0, match.start() - 24):match.start()]
             if re.search(r"(?i)\b(?:not|never|no|isn't|wasn't|aren't|don't|didn't)\s*$", prefix):
                 return True
@@ -423,5 +460,4 @@ class ReactionLibrary:
         pool = fresh or candidates
         # Importing random here would make the asset library unnecessarily
         # stateful; the caller can still seed Python's process-wide RNG in tests.
-        import random
         return random.choice(pool)

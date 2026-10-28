@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import httpx
 from pathlib import Path
 
 import pytest
@@ -74,6 +75,36 @@ def test_provider_preserves_sanitized_category_metadata(tmp_path: Path):
         assert "bearer" not in str(error).lower()
         await provider.close()
 
+    asyncio.run(run())
+
+
+def test_provider_connection_failure_is_bounded_and_classified(tmp_path: Path, monkeypatch):
+    settings = Settings.load(PROJECT_ROOT)
+    settings.xkiro_api_key = "test-key"
+    settings.database_path = tmp_path / "network.sqlite3"
+    settings.max_retries = 2
+    provider = XKiroProvider(settings)
+    calls = []
+
+    class Client:
+        async def post(self, *_args, **_kwargs):
+            calls.append(1)
+            raise httpx.ConnectTimeout("transport timeout")
+        async def aclose(self):
+            return None
+
+    provider.client = Client()
+    async def no_sleep(_seconds):
+        return None
+    monkeypatch.setattr("services.provider.asyncio.sleep", no_sleep)
+
+    async def run():
+        with pytest.raises(ProviderError) as raised:
+            await provider._request("/chat/completions", {"model": "test"})
+        assert raised.value.category == "network"
+        assert raised.value.retryable is True
+        assert len(calls) == 3
+        await provider.close()
     asyncio.run(run())
 
 
