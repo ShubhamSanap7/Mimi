@@ -150,6 +150,35 @@ class Store:
             ).fetchone()
             return int(row["id"])
 
+    def replace_memory(self, user_id: int, guild_id: int, memory_id: int, fact: str, *, memory_key: str = "",
+                       subject_id: int | None = None, subject_name: str = "", category: str = "") -> int | None:
+        """Atomically replace one scoped memory and return the verified row ID."""
+        fingerprint = " ".join(fact.lower().split())[:500]
+        with self.lock:
+            try:
+                self.conn.execute("BEGIN")
+                target = self.conn.execute(
+                    "SELECT id FROM memories WHERE id=? AND user_id=? AND guild_id=?", (memory_id, user_id, guild_id),
+                ).fetchone()
+                if target is None:
+                    self.conn.rollback()
+                    return None
+                self.conn.execute("DELETE FROM memories WHERE id=? AND user_id=? AND guild_id=?", (memory_id, user_id, guild_id))
+                timestamp = now_iso()
+                self.conn.execute(
+                    "INSERT INTO memories(user_id,guild_id,fact,fingerprint,created_at,last_used_at,memory_key,subject_id,subject_name,category) VALUES(?,?,?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(user_id,guild_id,fingerprint) DO UPDATE SET fact=excluded.fact,last_used_at=excluded.last_used_at,memory_key=excluded.memory_key,subject_id=excluded.subject_id,subject_name=excluded.subject_name,category=excluded.category",
+                    (user_id, guild_id, fact[:500], fingerprint, timestamp, timestamp, memory_key[:120], subject_id, subject_name[:100], category[:80]),
+                )
+                row = self.conn.execute(
+                    "SELECT id FROM memories WHERE user_id=? AND guild_id=? AND fingerprint=?", (user_id, guild_id, fingerprint),
+                ).fetchone()
+                self.conn.commit()
+                return int(row["id"]) if row else None
+            except Exception:
+                self.conn.rollback()
+                raise
+
     def find_memory_matches(self, user_id: int, guild_id: int, query: str) -> list[sqlite3.Row]:
         normalized = " ".join(query.lower().split())
         exact_tokens = {token for token in normalized.split() if len(token) >= 3 and token not in {"the", "that", "this", "old", "memory", "fact"}}

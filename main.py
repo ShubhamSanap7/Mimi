@@ -1058,6 +1058,60 @@ class MimiBot(commands.Bot):
         suffix = fact[len(name):].lstrip(" '")
         return f"{name} (Discord user ID {member.id})'s {suffix}", str(member.id)
 
+    def _persist_memory_fact(self, message: discord.Message, fact: str) -> tuple[bool, str, str | None]:
+        """Persist one already-validated fact and verify it is readable afterward."""
+        guild_id = message.guild.id if message.guild else 0
+        resolved_fact, subject = self._resolve_memory_subject(message, fact)
+        if subject == "ambiguous":
+            return False, resolved_fact, "ambiguous"
+        if not resolved_fact or len(resolved_fact) < 4:
+            return False, resolved_fact, "invalid"
+        try:
+            subject_id = int(subject) if subject and subject.isdigit() else None
+            if subject_id is None and re.match(r"(?i)^(?:my|i)\b", fact):
+                subject_id = message.author.id
+            key = memory_key_for_fact(fact, subject_id)
+            category = key.rsplit(":", 1)[-1] if key else ""
+            memory_id = self.store.add_memory(
+                message.author.id, guild_id, resolved_fact,
+                memory_key=key or "", subject_id=subject_id,
+                subject_name=resolved_fact.split(" (Discord user ID", 1)[0][:100] if subject_id else "",
+                category=category,
+            )
+            verified = any(int(row["id"]) == memory_id for row in self.store.list_memories(
+                message.author.id, guild_id, self.settings.memory_expiry_days, self.settings.memory_never_expire_user_ids,
+            ))
+            return verified, resolved_fact, None if verified else "not_verified"
+        except Exception as exc:
+            log.warning("explicit memory save failed reason=%s", type(exc).__name__)
+            return False, resolved_fact, "storage"
+
+    def _replace_memory_fact(self, message: discord.Message, memory_id: int, fact: str) -> tuple[bool, str, str | None]:
+        """Atomically replace a specifically identified memory with a correction."""
+        guild_id = message.guild.id if message.guild else 0
+        resolved_fact, subject = self._resolve_memory_subject(message, fact)
+        if subject == "ambiguous":
+            return False, resolved_fact, "ambiguous"
+        try:
+            subject_id = int(subject) if subject and subject.isdigit() else None
+            if subject_id is None and re.match(r"(?i)^(?:my|i)\b", fact):
+                subject_id = message.author.id
+            key = memory_key_for_fact(fact, subject_id)
+            category = key.rsplit(":", 1)[-1] if key else ""
+            new_id = self.store.replace_memory(
+                message.author.id, guild_id, memory_id, resolved_fact,
+                memory_key=key or "", subject_id=subject_id,
+                subject_name=resolved_fact.split(" (Discord user ID", 1)[0][:100] if subject_id else "",
+                category=category,
+            )
+            verified = new_id is not None and any(int(row["id"]) == new_id for row in self.store.list_memories(
+                message.author.id, guild_id, self.settings.memory_expiry_days, self.settings.memory_never_expire_user_ids,
+            ))
+            return verified, resolved_fact, None if verified else "not_verified"
+        except Exception as exc:
+            log.warning("explicit memory replacement failed reason=%s", type(exc).__name__)
+            return False, resolved_fact, "storage"
+
     async def _handle_explicit_memory(self, message: discord.Message, intent: MemoryIntent) -> None:
         guild_id = message.guild.id if message.guild else 0
         if intent.action == "forget":
@@ -1076,34 +1130,13 @@ class MimiBot(commands.Bot):
         if intent.ambiguous:
             await message.reply("What exactly should I remember? Please include the complete fact.", mention_author=False, allowed_mentions=safe_allowed_mentions())
             return
-        fact, subject = self._resolve_memory_subject(message, intent.fact)
-        if subject == "ambiguous":
+        verified, fact, error = self._persist_memory_fact(message, intent.fact)
+        if error == "ambiguous":
             await message.reply("Which server member do you mean? Please use their exact Discord name.", mention_author=False, allowed_mentions=safe_allowed_mentions())
             return
-        if not fact or len(fact) < 4:
+        if error == "invalid":
             await message.reply("What exactly should I remember?", mention_author=False, allowed_mentions=safe_allowed_mentions())
             return
-        try:
-            subject_id = int(subject) if subject and subject.isdigit() else None
-            if subject_id is None and re.match(r"(?i)^(?:my|i)\b", intent.fact):
-                subject_id = message.author.id
-            key = memory_key_for_fact(intent.fact, subject_id)
-            category = key.rsplit(":", 1)[-1] if key else ""
-            memory_id = self.store.add_memory(
-                message.author.id,
-                guild_id,
-                fact,
-                memory_key=key or "",
-                subject_id=subject_id,
-                subject_name=fact.split(" (Discord user ID", 1)[0][:100] if subject_id else "",
-                category=category,
-            )
-            verified = any(int(row["id"]) == memory_id for row in self.store.list_memories(
-                message.author.id, guild_id, self.settings.memory_expiry_days, self.settings.memory_never_expire_user_ids
-            ))
-        except Exception as exc:
-            log.warning("explicit memory save failed reason=%s", type(exc).__name__)
-            verified = False
         response = f"Got it! I saved: {fact}" if verified else "I couldn’t save that just now—my memory storage failed."
         await message.reply(response, mention_author=False, allowed_mentions=safe_allowed_mentions())
 
@@ -1284,13 +1317,6 @@ class MimiBot(commands.Bot):
         scope_id = message.guild.id if message.guild else 0
         first_contact = self.store.interaction_state(message.author.id, scope_id) is None
         self.store.record_interaction(message.author.id, scope_id, datetime.now(timezone.utc).isoformat())
-        if memory_intent:
-            self.processing.add(message.id)
-            try:
-                await self._handle_explicit_memory(message, memory_intent)
-            finally:
-                self.processing.discard(message.id)
-            return
         if agent_trigger:
             self.processing.add(message.id)
             try:
@@ -1298,6 +1324,13 @@ class MimiBot(commands.Bot):
                     return
             finally:
                 self.processing.discard(message.id)
+        if memory_intent:
+            self.processing.add(message.id)
+            try:
+                await self._handle_explicit_memory(message, memory_intent)
+            finally:
+                self.processing.discard(message.id)
+            return
         now = time.monotonic()
         if now - self.user_cooldowns.get(message.author.id, 0) < self.settings.user_cooldown_seconds:
             return

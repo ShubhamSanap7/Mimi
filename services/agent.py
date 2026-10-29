@@ -97,11 +97,20 @@ class NaturalLanguagePlanner:
     _send = re.compile(r"(?i)\b(?:send|post)\s+(?:(?:a|this|the)\s+)?message\b")
     _schedule = re.compile(r"(?i)\b(?:remind\s+me|set\s+a\s+reminder|schedule\s+(?:a\s+)?follow[- ]?up|send\s+later)\b")
     _development = re.compile(r"(?i)\b(?:add|implement|build|code|program|develop|feature|functionality)\b")
+    _memory_correction = re.compile(r"(?i)\b(?:forget|delete|remove)\b.+(?:memory|birthday|fact).*[.!?]\s*.+\b(?:is|was)\b")
+    _memory_lookup = re.compile(r"(?i)\b(?:what\s+(?:do\s+you\s+remember|memories)|show\s+(?:my\s+)?memories|what\s+have\s+you\s+saved)\b")
+    _diagnostics = re.compile(r"(?i)\b(?:show|check|run)\s+(?:bot\s+)?(?:diagnostics|status|health)\b")
+    _settings_read = re.compile(r"(?i)\b(?:show|read|list|check|what\s+(?:is|are))\b.{0,40}\b(?:settings?|configuration|config)\b")
+    _settings_write = re.compile(r"(?is)\b(?:set|change|update)\s+(?:the\s+)?(?:setting\s+)?([a-z][a-z0-9_]*)\s*(?:to|=)\s*(.+)$")
+    _settings_reset = re.compile(r"(?i)\breset\s+(?:the\s+)?(?:setting\s+)?([a-z][a-z0-9_]*)\b")
 
     def is_candidate(self, text: str) -> bool:
         indirect_send = re.search(r"(?i)\b(?:need|want|have|going|trying)\s+to\s+send\b", text)
         direct_send = self._send.search(text) and not indirect_send
         return bool(self._cancel.search(text) or self._poll.search(text) or direct_send or self._schedule.search(text)
+                    or self._memory_correction.search(text) or self._memory_lookup.search(text)
+                    or self._diagnostics.search(text) or self._settings_read.search(text)
+                    or self._settings_write.search(text) or self._settings_reset.search(text)
                     or (self._development.search(text) and re.search(r"(?i)\b(?:poll|reminder|follow[- ]?up|capability|feature)\b", text)))
 
     def plan(self, text: str, pending_capability: str | None = None,
@@ -117,6 +126,24 @@ class NaturalLanguagePlanner:
                 return self._send_plan(text, pending_arguments or {}, continuation=True)
         if self._development.search(text) and re.search(r"(?i)\b(?:poll|reminder|follow[- ]?up|capability|feature)\b", text):
             return ActionPlan("code_change")
+        if self._memory_correction.search(text):
+            parts = re.split(r"[.!?]\s+", _clean(text), maxsplit=1)
+            if len(parts) < 2:
+                return ActionPlan("memory_correction", missing=("correction",))
+            delete_query = re.sub(r"(?i)^.*?\b(?:forget|delete|remove)\b", "", parts[0]).strip(" .,:-")
+            return ActionPlan("memory_correction", {"delete_query": delete_query, "new_fact": parts[1].strip()},
+                              () if delete_query and parts[1].strip() else ("correction",))
+        if self._memory_lookup.search(text):
+            return ActionPlan("memory_lookup")
+        if self._diagnostics.search(text):
+            return ActionPlan("diagnostics")
+        if self._settings_reset.search(text):
+            return ActionPlan("reset_setting", {"key": self._settings_reset.search(text).group(1)})
+        setting_write = self._settings_write.search(text)
+        if setting_write:
+            return ActionPlan("change_setting", {"key": setting_write.group(1), "value": setting_write.group(2).strip()})
+        if self._settings_read.search(text):
+            return ActionPlan("read_settings", {"text": text})
         if self._poll.search(text):
             return self._poll_plan(text, {})
         if self._schedule.search(text):
@@ -212,13 +239,24 @@ class AgentCore:
         self.registry.register(Capability("send_message", "Send one user-requested Discord message in the current authorized scope.", ("content",), ("destination_id",), "low", False, False, self._send_message))
         self.registry.register(Capability("create_poll", "Create a native Discord poll with validated options and duration.", ("question", "options"), ("duration_seconds",), "low", False, False, self._create_poll))
         self.registry.register(Capability("schedule_followup", "Schedule one bounded follow-up message in a guild channel.", ("content", "delay_seconds"), (), "low", False, False, self._schedule_followup))
+        self.registry.register(Capability("memory_correction", "Atomically delete one identified memory and save its corrected replacement.", ("delete_query", "new_fact"), (), "medium", False, False, self._memory_correction))
+        self.registry.register(Capability("memory_lookup", "Show the requesting user's scoped saved memories where privacy permits.", (), (), "low", False, True, self._memory_lookup))
+        self.registry.register(Capability("read_settings", "Read effective non-secret runtime settings for the owner.", (), (), "privileged", False, True, self._read_settings))
+        self.registry.register(Capability("change_setting", "Change one validated non-secret runtime setting for the owner.", ("key", "value"), (), "privileged", False, False, self._change_setting))
+        self.registry.register(Capability("reset_setting", "Reset one validated runtime setting to its environment default.", ("key",), (), "privileged", False, False, self._reset_setting))
+        self.registry.register(Capability("diagnostics", "Read the existing owner-only operational diagnostics.", (), (), "privileged", False, True, self._diagnostics))
 
     def pending_for(self, message: Any) -> Any:
         guild_id = getattr(getattr(message, "guild", None), "id", 0) or 0
         return self.bot.store.pending_task(message.author.id, guild_id, message.channel.id)
 
+    def _setting_key_in_text(self, text: str) -> str | None:
+        if not re.search(r"(?i)\b(?:show|read|check|what\s+is)\b", text):
+            return None
+        return next((key for key in self.bot.runtime_settings.specs if re.search(rf"\b{re.escape(key)}\b", text, re.I)), None)
+
     def is_candidate(self, text: str) -> bool:
-        return self.planner.is_candidate(text)
+        return self.planner.is_candidate(text) or self._setting_key_in_text(text) is not None
 
     async def handle_message(self, message: Any) -> bool:
         guild_id = getattr(getattr(message, "guild", None), "id", 0) or 0
@@ -226,6 +264,10 @@ class AgentCore:
         pending_capability = str(row["capability"]) if row else None
         pending_arguments = json.loads(row["arguments"]) if row else None
         plan = self.planner.plan(message.content, pending_capability, pending_arguments)
+        if not plan.capability and not plan.cancel:
+            setting_key = self._setting_key_in_text(message.content)
+            if setting_key:
+                plan = ActionPlan("read_settings", {"text": message.content})
         if not plan.capability and not plan.cancel:
             return False
         if plan.cancel:
@@ -340,3 +382,86 @@ class AgentCore:
                                                     str(args["content"]), due.isoformat(), f"schedule:{task_id}"):
             return CapabilityResult(False, "I couldn't save that follow-up safely.")
         return CapabilityResult(True, f"Okay, I'll post that follow-up in about {seconds // 60} minute(s).", {"task_id": task_id})
+
+    async def _memory_correction(self, _core: Any, args: dict[str, Any], message: Any) -> CapabilityResult:
+        guild_id = getattr(getattr(message, "guild", None), "id", 0) or 0
+        matches = self.bot.store.find_memory_matches(message.author.id, guild_id, str(args["delete_query"]))
+        if len(matches) != 1:
+            return CapabilityResult(False, "I couldn't identify exactly one memory to replace. Please include the old fact more precisely.")
+        new_fact = str(args["new_fact"])
+        subject_name = str(matches[0]["subject_name"] or "").strip()
+        if not subject_name:
+            subject_match = re.match(r"^(.+?)\s*\(Discord user ID\s*\d+\)", str(matches[0]["fact"]))
+            subject_name = subject_match.group(1).strip(" '\"") if subject_match else ""
+        pronoun = re.match(r"(?i)^(?:his|her|their)\s+(.+)$", new_fact)
+        if pronoun and subject_name:
+            new_fact = f"{subject_name}'s {pronoun.group(1)}"
+        verified, fact, error = self.bot._replace_memory_fact(message, int(matches[0]["id"]), new_fact)
+        if error == "ambiguous":
+            return CapabilityResult(False, "Which server member do you mean? Please use their exact Discord name.")
+        if not verified:
+            return CapabilityResult(False, "I couldn't save the correction, so I left the existing memory unchanged.")
+        return CapabilityResult(True, f"Updated that memory to: {fact}", {"memory_id": int(matches[0]["id"])})
+
+    async def _memory_lookup(self, _core: Any, _args: dict[str, Any], message: Any) -> CapabilityResult:
+        guild_id = getattr(getattr(message, "guild", None), "id", 0) or 0
+        rows = self.bot.store.list_memories(message.author.id, guild_id, self.bot.settings.memory_expiry_days,
+                                            self.bot.settings.memory_never_expire_user_ids, limit=10)
+        if getattr(message, "guild", None):
+            return CapabilityResult(True, f"I have {self.bot.store.count_memories(message.author.id, guild_id)} saved memories in this private scope. Use `/memory` for the private list.")
+        if not rows:
+            return CapabilityResult(True, "I don't have any saved memories for this conversation scope.")
+        return CapabilityResult(True, "Saved memories:\n" + "\n".join(f"- {row['fact']}" for row in rows)[:1800])
+
+    def _owner_only(self, message: Any) -> bool:
+        return bool(self.bot.is_owner_id(message.author.id))
+
+    @staticmethod
+    def _setting_value(value: Any, key: str) -> str:
+        if key == "personality_prompt":
+            return f"<text length={len(str(value))}>"
+        if isinstance(value, (frozenset, tuple, list)):
+            return ",".join(str(item) for item in value) or "(empty)"
+        return str(value)[:180]
+
+    async def _read_settings(self, _core: Any, args: dict[str, Any], message: Any) -> CapabilityResult:
+        if not self._owner_only(message):
+            return CapabilityResult(False, "That management capability is owner-only.")
+        registry = self.bot.runtime_settings
+        text = str(args.get("text", ""))
+        key = next((candidate for candidate in registry.specs if re.search(rf"\b{re.escape(candidate)}\b", text, re.I)), None)
+        if key:
+            spec = registry.specs[key]
+            return CapabilityResult(True, f"{spec.label}: {self._setting_value(registry.value(key), key)} ({'live' if spec.live else 'restart required'}).")
+        return CapabilityResult(True, f"Owner settings are available through `/dashboard` across {len(registry.specs)} registered entries. Secrets and authorization invariants are not editable.")
+
+    async def _change_setting(self, _core: Any, args: dict[str, Any], message: Any) -> CapabilityResult:
+        if not self._owner_only(message):
+            return CapabilityResult(False, "That management capability is owner-only.")
+        key = str(args["key"])
+        if key not in self.bot.runtime_settings.specs:
+            return CapabilityResult(False, "That setting is not an editable registered setting.")
+        try:
+            value = self.bot.runtime_settings.set(key, args["value"], changed_by=message.author.id)
+        except (KeyError, TypeError, ValueError) as exc:
+            log.info("natural setting change rejected key=%s reason=%s", key, type(exc).__name__)
+            return CapabilityResult(False, "That setting value was rejected by Mimi's validation rules.")
+        spec = self.bot.runtime_settings.specs[key]
+        return CapabilityResult(True, f"Updated {spec.label} to `{self._setting_value(value, key)}`." + (" Restart required." if not spec.live else ""))
+
+    async def _reset_setting(self, _core: Any, args: dict[str, Any], message: Any) -> CapabilityResult:
+        if not self._owner_only(message):
+            return CapabilityResult(False, "That management capability is owner-only.")
+        key = str(args["key"])
+        if key not in self.bot.runtime_settings.specs:
+            return CapabilityResult(False, "That setting is not an editable registered setting.")
+        try:
+            value = self.bot.runtime_settings.reset(key, changed_by=message.author.id)
+        except (KeyError, TypeError, ValueError):
+            return CapabilityResult(False, "That setting cannot be reset from the dashboard registry.")
+        return CapabilityResult(True, f"Reset {self.bot.runtime_settings.specs[key].label} to `{self._setting_value(value, key)}`.")
+
+    async def _diagnostics(self, _core: Any, _args: dict[str, Any], message: Any) -> CapabilityResult:
+        if not self._owner_only(message):
+            return CapabilityResult(False, "Diagnostics are owner-only.")
+        return CapabilityResult(True, self.bot.diagnostics_text()[:1800])
