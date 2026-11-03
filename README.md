@@ -1,3 +1,9 @@
+## Project at a glance
+
+A lightweight Discord AI chatbot with SQLite-backed memory, provider fallback, moderation-safe controls, optional vision/search features, and owner diagnostics.
+
+---
+
 # Mimi Bot 2.0
 
 Mimi is a lightweight Discord AI chatbot built with `discord.py`, SQLite, and the OpenAI-compatible xKiro API. It is designed for a small Wispbyte instance: no web dashboard, vector database, voice features, or unbounded background workers.
