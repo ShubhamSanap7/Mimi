@@ -334,6 +334,7 @@ class DashboardView(discord.ui.View, DashboardAuthorizationMixin):
     @discord.ui.button(label="Refresh assets", style=discord.ButtonStyle.secondary, row=3)
     async def refresh_assets(self, interaction: discord.Interaction, _: discord.ui.Button):
         self.bot.reaction_library.refresh()
+        self.bot._reaction_assets_available = None
         assets = self.bot.reaction_library.discover_assets(self.bot.reaction_library.manifest_metadata())
         await interaction.response.send_message(
             f"Reaction asset cache refreshed. Valid local assets: {len(assets)}.",
@@ -425,6 +426,7 @@ class MimiBot(commands.Bot):
         self.error_fallbacks = ErrorMessageSelector()
         self.request_semaphore = asyncio.Semaphore(settings.max_concurrent_requests)
         self.reaction_library = ReactionLibrary(settings.reaction_library_dir, max_file_bytes=settings.reaction_max_file_bytes)
+        self._reaction_assets_available: bool | None = None
         self.reaction_last_sent: dict[int, float] = {}
         self.recent_reactions: dict[int, deque[str]] = defaultdict(
             lambda: deque(maxlen=settings.reaction_repeat_window)
@@ -453,6 +455,8 @@ class MimiBot(commands.Bot):
             self.vision_enabled = bool(self.settings.vision_default)
         elif key == "reaction_max_file_bytes" and hasattr(self, "reaction_library"):
             self.reaction_library.max_file_bytes = self.settings.reaction_max_file_bytes
+            self.reaction_library.refresh()
+            self._reaction_assets_available = None
         elif key == "reaction_repeat_window" and hasattr(self, "recent_reactions"):
             self.recent_reactions = defaultdict(
                 lambda: deque(maxlen=self.settings.reaction_repeat_window),
@@ -1042,11 +1046,13 @@ class MimiBot(commands.Bot):
         return match.group(0).strip() if match else None
 
     def _identity_prompt(self) -> str:
+        if self._reaction_assets_available is None:
+            self._reaction_assets_available = bool(self.reaction_library.discover_assets(self.reaction_library.manifest_metadata()))
         capabilities = build_capabilities(
             self.settings,
             self.provider,
             vision_enabled=self.vision_enabled,
-            reaction_assets=bool(self.reaction_library.discover_assets(self.reaction_library.manifest_metadata())),
+            reaction_assets=self._reaction_assets_available,
         )
         agent_lines = []
         for name in self.agent.registry.names():
@@ -1237,9 +1243,15 @@ class MimiBot(commands.Bot):
                 log.info("reaction decision scope=%s result=suppressed reason=cooldown category=%s", scope_id, category)
                 return None
         recent = self.recent_reactions.get(scope_id, ()) if scope_id is not None else ()
-        asset = self.reaction_library.choose(text, answer, requested_category=category, recent_paths=recent)
+        asset = self.reaction_library.choose(
+            text, answer, requested_category=category, recent_paths=recent,
+            selection_key=str(scope_id or "global"),
+        )
         if asset is None and not force and category in {"sad", "crying", "disappointed"}:
-            asset = self.reaction_library.choose(text, answer, requested_category="supportive", recent_paths=recent)
+            asset = self.reaction_library.choose(
+                text, answer, requested_category="supportive", recent_paths=recent,
+                selection_key=str(scope_id or "global"),
+            )
         if asset is None:
             log.info("reaction decision scope=%s result=suppressed reason=no_asset category=%s", scope_id, category)
             return None
@@ -1377,7 +1389,8 @@ class MimiBot(commands.Bot):
         guild_id = message.guild.id if message.guild else 0
         memory_user_id = self.memory_scope_user_id(message)
         memories = self.store.list_memories(memory_user_id, guild_id, self.settings.memory_expiry_days,
-                                            self.settings.memory_never_expire_user_ids)
+                                            self.settings.memory_never_expire_user_ids,
+                                            limit=max(20, min(50, self.settings.max_relevant_memories * 8)))
         if first_contact is None:
             first_contact = self.store.interaction_state(message.author.id, guild_id) is None
         first_contact = first_contact and not memories
@@ -1419,9 +1432,8 @@ class MimiBot(commands.Bot):
         reservation = (str(reservation[0]), int(reservation[1]))
         settled = False
         try:
-            async with message.channel.typing():
-                async with self.request_semaphore:
-                    answer, _, search_info, usage = await self.provider.complete(prompt, use_web_search=wants_search)
+            async with self.request_semaphore:
+                answer, _, search_info, usage = await self.provider.complete(prompt, use_web_search=wants_search)
             await self._reconcile_budget(reservation, usage, web_search=wants_search, vision=bool(image_url))
             settled = True
         except ProviderError as exc:

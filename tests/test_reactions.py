@@ -84,6 +84,20 @@ def test_backward_compatible_root_names_are_selectable(tmp_path: Path):
     }
 
 
+def test_rotation_uses_multiple_matching_assets_before_repeating(tmp_path: Path):
+    root = tmp_path / "reactions"
+    root.mkdir()
+    metadata = {}
+    for index, color in enumerate(((255, 80, 80), (80, 255, 80), (80, 80, 255), (220, 160, 40))):
+        name = f"happy_{index}.gif"
+        write_gif(root / name, color)
+        metadata[name] = {"tags": ["happy"], "category": "anime"}
+    library = ReactionLibrary(root)
+    library.write_manifest(metadata)
+    selected = [library.choose("happy", requested_category="happy", selection_key="channel-1").relative_path for _ in range(4)]
+    assert len(set(selected)) == 4
+
+
 def test_invalid_signatures_and_oversized_files_are_rejected(tmp_path: Path):
     root = tmp_path / "reactions"
     root.mkdir()

@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import random
 from typing import Iterable, Mapping, TypedDict
+from collections import deque
 
 from PIL import Image, UnidentifiedImageError
 
@@ -83,6 +84,18 @@ CATEGORY_PATTERN_SOURCES: tuple[tuple[str, str], ...] = (
 # Compile once at import time. Reaction matching runs on every eligible reply,
 # so compiling these expressions inside each call needlessly burns CPU.
 CATEGORY_PATTERNS = tuple((name, re.compile(pattern, re.IGNORECASE)) for name, pattern in CATEGORY_PATTERN_SOURCES)
+
+# Conversation moods often use semantic names that are not literal asset tags.
+# These aliases keep the selector broad enough to use the full local library.
+CATEGORY_ALIASES: dict[str, tuple[str, ...]] = {
+    "gaming_victory": ("gaming_victory", "celebrating", "happy", "proud", "joy"),
+    "achievement_unlocked": ("achievement_unlocked", "celebrating", "happy", "proud", "joy"),
+    "excited": ("excited", "celebrating", "happy", "joy", "yay"),
+    "laughing": ("laughing", "joke", "mischievous", "smug"),
+    "shock": ("shock", "surprised", "stare", "confused"),
+    "plot_twist": ("plot_twist", "shock", "surprised", "confused"),
+    "supportive": ("supportive", "happy", "smile", "clap", "thumbsup"),
+}
 
 AUTOMATIC_SUPPRESS_PATTERN = re.compile(
     r"(?i)(?:\b(?:suicide|suicidal|self[- ]?harm|kill myself|want to die|overdose|abuse|assault|rape|doxx|"
@@ -168,12 +181,14 @@ class ReactionLibrary:
         self._scan_cache_max_bytes = max_file_bytes
         self._manifest_metadata_cache: dict[str, Mapping[str, object]] | None = None
         self._manifest_signature: tuple[int, int] | None = None
+        self._rotation_queues: dict[str, deque[str]] = {}
 
     def refresh(self) -> None:
         """Invalidate the validated asset cache after an operator changes files."""
         self._scan_cache = None
         self._manifest_metadata_cache = None
         self._manifest_signature = None
+        self._rotation_queues.clear()
 
     def _manifest_file_signature(self) -> tuple[int, int] | None:
         try:
@@ -443,21 +458,33 @@ class ReactionLibrary:
         return category or "auto"
 
     def choose(self, text: str, answer: str = "", *, requested_category: str | None = None,
-               recent_paths: Iterable[str] = ()) -> ReactionAsset | None:
+               recent_paths: Iterable[str] = (), selection_key: str = "") -> ReactionAsset | None:
         metadata = self.manifest_metadata()
         assets = self.discover_assets(metadata)
         if not assets:
             return None
         category = requested_category or self.infer_category(f"{text} {answer}")
         if category and category not in {"auto", "random"}:
-            candidates = [asset for asset in assets if category in asset.tags]
+            exact = [asset for asset in assets if category in asset.tags]
+            allowed_tags = {category} if exact else set(CATEGORY_ALIASES.get(category, (category,)))
+            candidates = [asset for asset in assets if allowed_tags.intersection(asset.tags)]
             if not candidates:
                 return None
         else:
             candidates = assets
         recent = set(recent_paths)
-        fresh = [asset for asset in candidates if asset.relative_path not in recent]
-        pool = fresh or candidates
-        # Importing random here would make the asset library unnecessarily
-        # stateful; the caller can still seed Python's process-wide RNG in tests.
-        return random.choice(pool)
+        by_path = {asset.relative_path: asset for asset in candidates}
+        queue_key = f"{selection_key}:{category or 'all'}"
+        queue = self._rotation_queues.get(queue_key)
+        candidate_paths = set(by_path)
+        if queue is None or set(queue) != candidate_paths:
+            queue = deque(random.sample(list(candidate_paths), len(candidate_paths)))
+            self._rotation_queues[queue_key] = queue
+        # Consume the least recently selected candidate. Rotate recent paths
+        # away when possible so normal cooldown/repeat rules remain intact.
+        for _ in range(len(queue)):
+            path = queue[0]
+            queue.rotate(-1)
+            if path not in recent:
+                return by_path[path]
+        return by_path[queue[0]] if queue else None
