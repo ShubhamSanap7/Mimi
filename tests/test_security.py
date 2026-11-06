@@ -7,7 +7,7 @@ import asyncio
 import discord
 
 from config.settings import Settings
-from main import MimiBot, safe_allowed_mentions
+from main import MimiBot, safe_allowed_mentions, safe_reply_mentions
 from services.provider import ProviderError
 
 
@@ -38,6 +38,14 @@ def test_every_outbound_message_call_sets_deny_all_mentions():
 
 def test_allowed_mentions_type_is_discord_policy():
     assert isinstance(safe_allowed_mentions(), discord.AllowedMentions)
+
+
+def test_reply_mentions_notify_only_the_replied_author():
+    policy = safe_reply_mentions()
+    assert policy.replied_user is True
+    assert policy.everyone is False
+    assert policy.users is False
+    assert policy.roles is False
 
 
 class _Typing:
@@ -98,7 +106,7 @@ def test_hostile_ai_output_uses_deny_all_policy(tmp_path: Path):
         assert policy.everyone is False
         assert policy.users is False
         assert policy.roles is False
-        assert policy.replied_user is False
+        assert policy.replied_user is True
         await bot.close()
 
     asyncio.run(run())
@@ -122,6 +130,7 @@ def test_provider_error_reply_uses_deny_all_policy(tmp_path: Path):
         assert policy.everyone is False
         assert policy.users is False
         assert policy.roles is False
+        assert policy.replied_user is True
         await bot.close()
 
     asyncio.run(run())

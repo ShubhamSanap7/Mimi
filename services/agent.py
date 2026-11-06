@@ -315,7 +315,10 @@ class AgentCore:
         return " ".join(labels[item] for item in plan.missing)
 
     async def _reply(self, message: Any, content: str) -> None:
-        await message.reply(content[:1900], mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+        await message.reply(
+            content[:1900], mention_author=True,
+            allowed_mentions=discord.AllowedMentions(everyone=False, users=False, roles=False, replied_user=True),
+        )
 
     @staticmethod
     def _channel_permission(channel: Any, bot: Any) -> bool:

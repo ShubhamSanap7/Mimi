@@ -330,7 +330,7 @@ def test_explicit_gif_requests_dispatch_locally_without_ai(tmp_path: Path):
             self.mentions = []
 
         async def reply(self, *_args, **_kwargs):
-            raise AssertionError("an explicit GIF request should not need a text fallback")
+                self.channel.files.append(_kwargs["file"])
 
     async def unexpected_ai_call(*_args, **_kwargs):
         raise AssertionError("explicit GIF requests must not call the AI provider")

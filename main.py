@@ -60,6 +60,15 @@ def safe_allowed_mentions() -> discord.AllowedMentions:
     return discord.AllowedMentions.none()
 
 
+def safe_reply_mentions() -> discord.AllowedMentions:
+    """Notify only the author of the message being replied to.
+
+    This produces Discord's normal reply highlight/notification while still
+    blocking arbitrary user, role, @here, and @everyone mentions in content.
+    """
+    return discord.AllowedMentions(everyone=False, users=False, roles=False, replied_user=True)
+
+
 def split_message(text: str, limit: int = 1900) -> list[str]:
     text = text.strip() or "I’m not sure what to say yet."
     parts = []
@@ -812,7 +821,7 @@ class MimiBot(commands.Bot):
         display_name = str(getattr(participant, "display_name", getattr(participant, "name", "bot")))[:80]
         content = f"<@{participant_id}> {display_name}, quick question: {topic}"
         try:
-            sent = await channel.send(content, allowed_mentions=self._multi_bot_allowed_mentions(participant_id))
+            sent = await channel.send(content, allowed_mentions=self._bot_reply_mentions(participant_id))
         except (discord.Forbidden, discord.HTTPException, OSError) as exc:
             log.warning("multi-bot initiation failed reason=%s", type(exc).__name__)
             return False
@@ -883,7 +892,7 @@ class MimiBot(commands.Bot):
             if not is_chatbot_reply:
                 reaction = self._select_local_reaction(message.content, scope_id=message.channel.id)
                 if reaction:
-                    await self._send_local_reaction(message.channel, reaction, scope_id=message.channel.id)
+                    await self._send_local_reaction(message.channel, reaction, scope_id=message.channel.id, reply_to=message)
                 log.info("multi-bot message handled mode=normal_bot_reaction author_id=%s", message.author.id)
                 return True
             if self.multi_bot_last_started_at is not None and (utc_now() - self.multi_bot_last_started_at).total_seconds() < settings.multi_bot_cooldown_seconds:
@@ -1144,32 +1153,32 @@ class MimiBot(commands.Bot):
         guild_id = message.guild.id if message.guild else 0
         if intent.action == "forget":
             if not intent.query:
-                await message.reply("Which memory should I forget?", mention_author=False, allowed_mentions=safe_allowed_mentions())
+                await message.reply("Which memory should I forget?", mention_author=True, allowed_mentions=safe_reply_mentions())
                 return
             matches = self.store.find_memory_matches(self.memory_scope_user_id(message), guild_id, intent.query)
             if len(matches) != 1:
                 response = "I couldn’t identify exactly one memory to forget." if matches else "I couldn’t find that memory."
-                await message.reply(response, mention_author=False, allowed_mentions=safe_allowed_mentions())
+                await message.reply(response, mention_author=True, allowed_mentions=safe_reply_mentions())
                 return
             deleted = self.store.delete_memory(message.author.id, guild_id, int(matches[0]["id"]))
             response = "Got it—I've forgotten that memory." if deleted else "I couldn’t remove that memory just now."
-            await message.reply(response, mention_author=False, allowed_mentions=safe_allowed_mentions())
+            await message.reply(response, mention_author=True, allowed_mentions=safe_reply_mentions())
             return
         if intent.ambiguous:
-            await message.reply("What exactly should I remember? Please include the complete fact.", mention_author=False, allowed_mentions=safe_allowed_mentions())
+            await message.reply("What exactly should I remember? Please include the complete fact.", mention_author=True, allowed_mentions=safe_reply_mentions())
             return
         verified, fact, error = self._persist_memory_fact(message, intent.fact)
         if error == "ambiguous":
-            await message.reply("Which server member do you mean? Please use their exact Discord name.", mention_author=False, allowed_mentions=safe_allowed_mentions())
+            await message.reply("Which server member do you mean? Please use their exact Discord name.", mention_author=True, allowed_mentions=safe_reply_mentions())
             return
         if error == "invalid":
-            await message.reply("What exactly should I remember?", mention_author=False, allowed_mentions=safe_allowed_mentions())
+            await message.reply("What exactly should I remember?", mention_author=True, allowed_mentions=safe_reply_mentions())
             return
         if error == "private_fact":
-            await message.reply("I only keep shared public server facts, not private member details.", mention_author=False, allowed_mentions=safe_allowed_mentions())
+            await message.reply("I only keep shared public server facts, not private member details.", mention_author=True, allowed_mentions=safe_reply_mentions())
             return
         response = f"Got it! I saved: {fact}" if verified else "I couldn’t save that just now—my memory storage failed."
-        await message.reply(response, mention_author=False, allowed_mentions=safe_allowed_mentions())
+        await message.reply(response, mention_author=True, allowed_mentions=safe_reply_mentions())
 
     def _relevant_memories(self, rows, text: str) -> list:
         words = set(re.findall(r"[a-z0-9']{3,}", text.lower()))
@@ -1259,7 +1268,7 @@ class MimiBot(commands.Bot):
         return asset.path
 
     async def _send_local_reaction(self, channel: discord.abc.Messageable, reaction: Path, *, force: bool = False,
-                                   scope_id: int | None = None) -> bool:
+                                   scope_id: int | None = None, reply_to: discord.Message | None = None) -> bool:
         self._prune_reaction_state()
         if not self._valid_reaction_file(reaction):
             log.info("reaction send scope=%s result=failed reason=invalid_asset asset=%s", scope_id, reaction.name)
@@ -1270,7 +1279,10 @@ class MimiBot(commands.Bot):
                 log.info("reaction send scope=%s result=suppressed reason=cooldown asset=%s", scope_id, reaction.name)
                 return False
         try:
-            await channel.send(file=discord.File(reaction), allowed_mentions=safe_allowed_mentions())
+            if reply_to is not None:
+                await reply_to.reply(file=discord.File(reaction), mention_author=True, allowed_mentions=safe_reply_mentions())
+            else:
+                await channel.send(file=discord.File(reaction), allowed_mentions=safe_allowed_mentions())
             if scope_id is not None:
                 self.reaction_last_sent[scope_id] = time.monotonic()
                 try:
@@ -1291,12 +1303,12 @@ class MimiBot(commands.Bot):
             force=True,
             scope_id=message.channel.id,
         )
-        if reaction and await self._send_local_reaction(message.channel, reaction, force=True, scope_id=message.channel.id):
+        if reaction and await self._send_local_reaction(message.channel, reaction, force=True, scope_id=message.channel.id, reply_to=message):
             return
         await message.reply(
             "I don’t have a suitable local reaction asset for that yet.",
-            mention_author=False,
-            allowed_mentions=safe_allowed_mentions(),
+            mention_author=True,
+            allowed_mentions=safe_reply_mentions(),
         )
 
     def _image_needs_resend(self, message: discord.Message, image_url: str | None) -> bool:
@@ -1427,7 +1439,7 @@ class MimiBot(commands.Bot):
             vision=bool(image_url),
         )
         if reservation[0] is None:
-            await message.reply(str(reservation[1]), mention_author=False, allowed_mentions=safe_allowed_mentions())
+            await message.reply(str(reservation[1]), mention_author=True, allowed_mentions=safe_reply_mentions())
             return
         reservation = (str(reservation[0]), int(reservation[1]))
         settled = False
@@ -1441,8 +1453,8 @@ class MimiBot(commands.Bot):
             settled = True
             await message.reply(
                 self.friendly_ai_error(exc, message.channel.id),
-                mention_author=False,
-                allowed_mentions=safe_allowed_mentions(),
+                mention_author=True,
+                allowed_mentions=safe_reply_mentions(),
             )
             return
         finally:
@@ -1456,7 +1468,7 @@ class MimiBot(commands.Bot):
             answer += f"\n\n_{search_info.get('notice', 'Live search was unavailable; this answer may not be current.')}_"
         answer = remove_unsupported_dm_claim(answer)
         for part in split_message(answer):
-            await message.reply(part, mention_author=False, allowed_mentions=safe_allowed_mentions())
+            await message.reply(part, mention_author=True, allowed_mentions=safe_reply_mentions())
         if message.id not in self.reaction_message_ids:
             conversation_context = "\n".join(item["content"] for item in self._recent_history(message))
             reaction = self._select_local_reaction(
