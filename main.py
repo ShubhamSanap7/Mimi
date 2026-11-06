@@ -875,7 +875,10 @@ class MimiBot(commands.Bot):
             return False
         if self.user and message.author.id == self.user.id:
             return True
-        is_chatbot_reply = False
+        is_chatbot_reply = bool(
+            self.user and any(getattr(mentioned_user, "id", None) == self.user.id
+                              for mentioned_user in getattr(message, "mentions", ()))
+        )
         reference = getattr(message, "reference", None)
         if reference and getattr(reference, "message_id", None):
             resolved = getattr(reference, "resolved", None)

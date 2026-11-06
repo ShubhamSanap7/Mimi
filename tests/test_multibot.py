@@ -197,6 +197,27 @@ def test_bot_replying_to_mimi_starts_bounded_chat_without_allowlist(tmp_path: Pa
     asyncio.run(run())
 
 
+def test_bot_mentioning_mimi_counts_as_chatbot_participation(tmp_path: Path):
+    bot = make_bot(tmp_path)
+    bot._connection.user = FakeUser(42, bot=True, name="Mimi")
+    channel = FakeChannel()
+
+    async def complete(*_args, **_kwargs):
+        return "I noticed your question!", "test", {}, {"input_tokens": 1, "output_tokens": 1, "exact": True}
+
+    async def run():
+        bot.settings.multi_bot_reply_cooldown_seconds = 0
+        bot.provider.complete = complete
+        incoming = FakeMessage(FakeUser(999, bot=True), "@Mimi what do you think?", message_id=901, channel=channel)
+        incoming.mentions = [bot.user]
+        assert await bot._handle_multi_bot_message(incoming) is True
+        assert bot.multi_bot_conversation is not None
+        assert channel.sent
+        await bot.close()
+
+    asyncio.run(run())
+
+
 def test_unapproved_bot_same_name_and_unrelated_channel_are_ignored(tmp_path: Path):
     bot = make_bot(tmp_path)
     bot.multi_bot_conversation = MultiBotConversation(CHROMIX, datetime.now(timezone.utc), datetime.now(timezone.utc))
