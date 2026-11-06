@@ -112,6 +112,8 @@ def test_router_primary_success_never_calls_groq(tmp_path: Path):
     settings = Settings.load(PROJECT_ROOT)
     settings.xkiro_api_key = "test-key"
     settings.groq_api_key = "groq-test-key"
+    settings.primary_provider = "groq"
+    settings.fallback_provider = "xkiro"
     settings.database_path = tmp_path / "router.sqlite3"
     router = AIProviderRouter(settings)
     calls = []
@@ -137,8 +139,8 @@ def test_router_primary_success_never_calls_groq(tmp_path: Path):
 
     async def run():
         answer, _, _, _ = await router.complete([{"role": "user", "content": "hi"}])
-        assert answer == "primary answer"
-        assert calls == ["xkiro"]
+        assert answer == "groq answer"
+        assert calls == ["groq"]
         await router.close()
 
     asyncio.run(run())
@@ -148,6 +150,8 @@ def test_router_uses_groq_once_only_for_transient_xkiro_failure(tmp_path: Path):
     settings = Settings.load(PROJECT_ROOT)
     settings.xkiro_api_key = "test-key"
     settings.groq_api_key = "groq-test-key"
+    settings.primary_provider = "xkiro"
+    settings.fallback_provider = "groq"
     settings.database_path = tmp_path / "router.sqlite3"
     router = AIProviderRouter(settings)
     calls = []
@@ -186,6 +190,8 @@ def test_status_and_upstream_errors_are_groq_eligible(status: int, code: str | N
     settings = Settings.load(PROJECT_ROOT)
     settings.xkiro_api_key = "test-key"
     settings.groq_api_key = "groq-test-key"
+    settings.primary_provider = "xkiro"
+    settings.fallback_provider = "groq"
     settings.database_path = tmp_path / f"router-{status}.sqlite3"
     router = AIProviderRouter(settings)
     calls = []
@@ -225,6 +231,8 @@ def test_router_does_not_use_groq_for_permanent_xkiro_error_or_missing_key(tmp_p
     settings = Settings.load(PROJECT_ROOT)
     settings.xkiro_api_key = "test-key"
     settings.groq_api_key = ""
+    settings.primary_provider = "xkiro"
+    settings.fallback_provider = "groq"
     settings.database_path = tmp_path / "router.sqlite3"
     router = AIProviderRouter(settings)
     calls = []

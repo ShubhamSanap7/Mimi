@@ -385,7 +385,7 @@ class AgentCore:
 
     async def _memory_correction(self, _core: Any, args: dict[str, Any], message: Any) -> CapabilityResult:
         guild_id = getattr(getattr(message, "guild", None), "id", 0) or 0
-        matches = self.bot.store.find_memory_matches(message.author.id, guild_id, str(args["delete_query"]))
+        matches = self.bot.store.find_memory_matches(self.bot.memory_scope_user_id(message), guild_id, str(args["delete_query"]))
         if len(matches) != 1:
             return CapabilityResult(False, "I couldn't identify exactly one memory to replace. Please include the old fact more precisely.")
         new_fact = str(args["new_fact"])
@@ -405,10 +405,11 @@ class AgentCore:
 
     async def _memory_lookup(self, _core: Any, _args: dict[str, Any], message: Any) -> CapabilityResult:
         guild_id = getattr(getattr(message, "guild", None), "id", 0) or 0
-        rows = self.bot.store.list_memories(message.author.id, guild_id, self.bot.settings.memory_expiry_days,
+        scope_user_id = self.bot.memory_scope_user_id(message)
+        rows = self.bot.store.list_memories(scope_user_id, guild_id, self.bot.settings.memory_expiry_days,
                                             self.bot.settings.memory_never_expire_user_ids, limit=10)
         if getattr(message, "guild", None):
-            return CapabilityResult(True, f"I have {self.bot.store.count_memories(message.author.id, guild_id)} saved memories in this private scope. Use `/memory` for the private list.")
+            return CapabilityResult(True, f"I have {self.bot.store.count_memories(scope_user_id, guild_id)} shared memories for this server. Use `/memory` to view them privately.")
         if not rows:
             return CapabilityResult(True, "I don't have any saved memories for this conversation scope.")
         return CapabilityResult(True, "Saved memories:\n" + "\n".join(f"- {row['fact']}" for row in rows)[:1800])

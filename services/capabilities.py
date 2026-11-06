@@ -15,15 +15,15 @@ class Capability:
 def build_capabilities(settings, provider, *, vision_enabled: bool, reaction_assets: bool) -> tuple[Capability, ...]:
     groq_ready = bool(getattr(provider, "groq_configured", False))
     return (
-        Capability("discord_chat", "Discord chat", "Reply to permitted Discord messages and DMs.", True, True, True, "Mention and cooldown protections apply."),
-        Capability("memory", "Scoped memory", "Save, update, view, and delete useful memories in the current user/server scope.", True, True, True, "Memory is not the same as unsupplied conversation history."),
-        Capability("xkiro", "xKiro AI", f"Primary AI provider using model {settings.primary_model}.", True, bool(settings.xkiro_api_key), bool(settings.xkiro_api_key), "Unavailable until XKIRO_API_KEY is configured."),
-        Capability("groq_fallback", "Groq fallback", f"One-attempt fallback using model {settings.groq_model}.", True, bool(settings.groq_fallback_enabled), groq_ready, "Optional; only used for eligible transient xKiro failures."),
+        Capability("discord_chat", "Discord chat", "Reply to permitted guild messages when mentioned, replied to, or otherwise eligible.", True, True, True, "Incoming DMs are disabled."),
+        Capability("memory", "Shared guild memory", "Save, update, view, and delete explicitly requested public facts in one shared memory for the current server.", True, True, True, "Personal/private facts are not automatically stored."),
+        Capability("xkiro_fallback", "xKiro fallback", f"Fallback provider using model {settings.primary_model}.", True, bool(settings.xkiro_api_key), bool(settings.xkiro_api_key), "Unavailable until XKIRO_API_KEY is configured."),
+        Capability("groq_primary", "Groq primary", f"Primary provider using model {settings.groq_model}.", True, bool(settings.groq_fallback_enabled), groq_ready, "Optional; xKiro is used as the fallback."),
         Capability("local_reactions", "Local GIF reactions", "Select and attach validated local reaction assets.", True, True, reaction_assets, "Only configured local assets are sent; no image generation."),
-        Capability("vision", "Image understanding", "Analyze approved Discord image attachments when enabled and provider-supported.", True, bool(vision_enabled), bool(vision_enabled and settings.xkiro_api_key), "Size, daily-budget, and provider capability limits apply."),
-        Capability("multi_bot", "Allowlisted multi-bot conversations", "Bounded conversations with configured bot IDs in one configured channel.", True, bool(settings.multi_bot_enabled), bool(settings.multi_bot_enabled), "Names never authorize participants."),
-        Capability("web_search", "Provider web search", "Optional current-information search through the configured xKiro feature.", True, True, bool(settings.xkiro_api_key), "Not used for ordinary messages and unavailable on Groq fallback."),
-        Capability("owner_dashboard", "Owner dashboard", "Owner-only settings, diagnostics, and runtime controls.", True, True, bool(settings.owner_ids), "Authorization is enforced by Discord user ID."),
+        Capability("vision", "Image understanding", "Analyze Discord image attachments.", True, False, False, "Disabled by current product configuration."),
+        Capability("multi_bot", "Behavior-based bot conversations", "React to ordinary bots and hold bounded conversations only when a bot replies directly to Mimi in the configured channel.", True, bool(settings.multi_bot_enabled), bool(settings.multi_bot_enabled), "There is no participant allowlist; channel restriction, bot identity, cooldowns, and message limits apply."),
+        Capability("web_search", "Provider web search", "Optional current-information search through the configured provider.", True, True, bool(settings.xkiro_api_key), "Only supported by the xKiro route; unavailable when Groq handles the request."),
+        Capability("owner_diagnostics", "Owner diagnostics", "Owner-only diagnostic slash command.", True, True, bool(settings.owner_ids), "The interactive dashboard and settings panel are disabled."),
     )
 
 def capability_prompt(capabilities: tuple[Capability, ...]) -> str:

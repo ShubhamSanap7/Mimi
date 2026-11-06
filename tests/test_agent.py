@@ -120,7 +120,7 @@ def test_schedule_followup_persists_bounded_task(tmp_path):
 def test_memory_correction_replaces_only_identified_record(tmp_path):
     bot = make_bot(tmp_path)
     old_id = bot.store.add_memory(
-        42, 7, "Egoist (Discord user ID 88)'s birthday is November 4",
+        0, 7, "Egoist (Discord user ID 88)'s birthday is November 4",
         memory_key="subject:88:birthday", subject_id=88, subject_name="Egoist", category="birthday",
     )
 
@@ -134,7 +134,7 @@ def test_memory_correction_replaces_only_identified_record(tmp_path):
         message = Message("Mimi, delete the memory where Egoist's birthday is November 4. His birthday is July 23.", channel)
         message.guild = type("ScopedGuild", (), {"id": 7, "members": [Member()]})()
         assert await bot.agent.handle_message(message) is True
-        rows = bot.store.list_memories(42, 7, 30)
+        rows = bot.store.list_memories(0, 7, 30)
         assert len(rows) == 1
         assert int(rows[0]["id"]) == old_id
         assert "July 23" in rows[0]["fact"]

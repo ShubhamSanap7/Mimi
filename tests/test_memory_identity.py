@@ -38,7 +38,7 @@ def test_explicit_memory_save_is_persisted_and_visible(tmp_path: Path):
 
     class Message:
         id = 100
-        content = "Remember that my birthday is 14 March."
+        content = "Remember that the server tournament is on 14 March."
         author = type("User", (), {"id": 1, "bot": False})()
         guild = type("Guild", (), {"id": 10, "members": []})()
         channel = Channel()
@@ -52,9 +52,9 @@ def test_explicit_memory_save_is_persisted_and_visible(tmp_path: Path):
 
     async def run():
         await bot.handle_message(message)
-        rows = bot.store.list_memories(1, 10, 30)
+        rows = bot.store.list_memories(0, 10, 30)
         assert len(rows) == 1
-        assert "birthday" in rows[0]["fact"]
+        assert "tournament" in rows[0]["fact"]
         assert "saved" in message.reply_content.lower()
         await bot.close()
 
@@ -72,7 +72,7 @@ def test_identity_and_capability_prompt_reflect_live_groq_model(tmp_path: Path):
     assert "Mimi" in text and "AI agent" in text
     assert "qwen/qwen3.8-27b" in text
     assert "test-key" not in text and "groq-test-key" not in text
-    assert "Scoped memory" in text
+    assert "Shared guild memory" in text
     asyncio.run(bot.close())
 
 
@@ -111,7 +111,7 @@ def test_capability_registry_marks_optional_features_unavailable(tmp_path: Path)
     bot = MimiBot(settings)
     capabilities = build_capabilities(settings, bot.provider, vision_enabled=False, reaction_assets=False)
     by_id = {item.identifier: item for item in capabilities}
-    assert by_id["xkiro"].available is False
-    assert by_id["groq_fallback"].available is False
+    assert by_id["xkiro_fallback"].available is False
+    assert by_id["groq_primary"].available is False
     assert by_id["local_reactions"].available is False
     asyncio.run(bot.close())

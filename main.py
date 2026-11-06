@@ -23,7 +23,7 @@ from services.capabilities import build_capabilities, capability_prompt
 from services.memory_intent import MemoryIntent, detect_memory_intent, memory_key_for_fact
 from services.provider import AIProviderRouter, ProviderError
 from services.reactions import ReactionLibrary
-from services.multibot import MultiBotConversation, configured_participants, utc_now
+from services.multibot import MultiBotConversation, utc_now
 from services.multibot import opener_fingerprint, topic_fingerprint, topics_overlap
 from services.error_messages import ErrorMessageSelector, category_for_error
 from services.runtime_settings import RuntimeSettings, SettingSpec
@@ -305,12 +305,11 @@ class DashboardView(discord.ui.View, DashboardAuthorizationMixin):
 
     @discord.ui.button(label="Diagnostics", style=discord.ButtonStyle.secondary, row=2)
     async def diagnostics(self, interaction: discord.Interaction, _: discord.ui.Button):
-        configured = self.bot._multi_bot_participant_ids()
         channel = self.bot.get_channel(self.bot.settings.multi_bot_channel_id) if self.bot.settings.multi_bot_channel_id else None
         status = self.bot.diagnostics_text()
         status += f"\nLast provider route: {self.bot.provider.last_provider}; fallback attempted: {'yes' if self.bot.provider.last_fallback_attempted else 'no'}; fallback succeeded: {'yes' if self.bot.provider.last_fallback_succeeded else 'no'}"
         status += f"\nMulti-bot channel resolved: {'yes' if channel else 'no'}"
-        status += f"\nConfigured participant IDs: {len(configured)}"
+        status += "\nParticipant allowlist: disabled; bot identity is inferred from message behavior"
         status += f"\nActive conversation: {'yes' if self.bot.multi_bot_conversation else 'no'}"
         audit = self.bot.store.recent_setting_audit(5)
         if audit:
@@ -441,6 +440,11 @@ class MimiBot(commands.Bot):
         self.multi_bot_last_activity_at: datetime | None = None
         self.multi_bot_seen_message_ids: set[int] = set()
         self.multi_bot_seen_message_order: deque[int] = deque(maxlen=200)
+
+    @staticmethod
+    def memory_scope_user_id(message: discord.Message) -> int:
+        """Use one shared public memory per guild; DMs are intentionally disabled."""
+        return 0
 
     def _runtime_setting_changed(self, key: str) -> None:
         if key == "personality_prompt":
@@ -601,13 +605,8 @@ class MimiBot(commands.Bot):
         removed = self.store.sweep_expired_memories(self.settings.memory_expiry_days, self.settings.memory_never_expire_user_ids)
         if removed:
             log.info("Memory expiry sweep removed records=%s", removed)
-        if self.settings.inactivity_enabled and not self.inactivity_check.is_running():
-            self.inactivity_check.change_interval(seconds=self.settings.inactivity_check_interval_seconds)
-            self.inactivity_check.start()
-        if self.settings.multi_bot_enabled and not self.multi_bot_check.is_running():
-            self.multi_bot_last_activity_at = utc_now()
-            self.multi_bot_check.change_interval(seconds=self.settings.multi_bot_check_interval_seconds)
-            self.multi_bot_check.start()
+        # Multi-bot mode is event-driven: it may answer an allowlisted bot's
+        # message, but it does not proactively start or ping bots.
         if not self.agent_schedule_check.is_running():
             self.agent_schedule_check.change_interval(seconds=60)
             self.agent_schedule_check.start()
@@ -723,21 +722,18 @@ class MimiBot(commands.Bot):
         disk = shutil.disk_usage(BASE_DIR)
         groq_status = "configured" if self.provider.groq_configured else "unconfigured/disabled"
         return (f"Uptime: {int(time.monotonic() - self.started_at)}s\nLatency: {self.latency * 1000:.0f}ms\n"
-                f"Primary: xKiro/{self.settings.primary_model} (fallback model configured)\n"
-                f"Secondary: Groq/{self.settings.groq_model} ({groq_status})\nRandom: {self.settings.random_probability:.2%}\n"
-                f"Vision: {'on' if self.vision_enabled else 'off'}\nMemory rows/users: {total}/{users}\n"
+                f"Primary: Groq/{self.settings.groq_model} ({groq_status})\n"
+                f"Fallback: xKiro/{self.settings.primary_model}\nRandom: {self.settings.random_probability:.2%}\n"
+                f"Shared guild memory rows: {total}\n"
                 f"Usage: {usage['used_tokens']:,}/{usage['budget']:,} ({usage['mode']}, {'exact' if usage['exact'] else 'estimated'})\n"
                 f"Disk free: {disk.free // (1024**2)} MB\nProcess memory: unavailable\nRecent errors: {len(self.error_messages)}\n"
                 f"Multi-bot: {'on' if self.settings.multi_bot_enabled else 'off'}")
 
-    def _multi_bot_participant_ids(self) -> tuple[int, ...]:
-        return configured_participants(self.settings.multi_bot_chromix_id, self.settings.multi_bot_blaze_id)
-
-    def _multi_bot_allowed_mentions(self, participant_id: int) -> discord.AllowedMentions:
-        """Allow exactly one configured participant; all other mention types stay disabled."""
+    def _bot_reply_mentions(self, bot_id: int) -> discord.AllowedMentions:
+        """Allow only the bot that actually authored the triggering message."""
         return discord.AllowedMentions(
             everyone=False,
-            users=[discord.Object(id=participant_id)],
+            users=[discord.Object(id=bot_id)],
             roles=False,
             replied_user=False,
         )
@@ -775,20 +771,12 @@ class MimiBot(commands.Bot):
         if not force and random.random() >= settings.multi_bot_initiation_probability:
             log.info("multi-bot decision result=suppressed reason=probability")
             return False
-        participant_ids = list(self._multi_bot_participant_ids())
-        if not participant_ids:
-            log.warning("No valid multi-bot participant IDs are configured")
-            return False
-        random.shuffle(participant_ids)
+        # Proactive bot conversations are disabled. A conversation can only
+        # begin after an actual bot replies to Mimi's own message.
+        return False
+
         participant_id = 0
         participant = None
-        for candidate_id in participant_ids:
-            candidate = await self._verified_multi_bot(channel, candidate_id)
-            if candidate is not None:
-                participant_id, participant = candidate_id, candidate
-                break
-        if participant is None:
-            return False
         topics = (
             "Which game or anime has the most unfairly overpowered side character?",
             "What game mechanic would you redesign to make matches more interesting?",
@@ -870,12 +858,46 @@ class MimiBot(commands.Bot):
         settings = self.settings
         if not settings.multi_bot_enabled or not getattr(message.channel, "id", None) == settings.multi_bot_channel_id:
             return False
-        if not getattr(message.author, "bot", False) or message.author.id not in self._multi_bot_participant_ids():
+        if not getattr(message.author, "bot", False):
             return False
         if self.user and message.author.id == self.user.id:
             return True
+        is_chatbot_reply = False
+        reference = getattr(message, "reference", None)
+        if reference and getattr(reference, "message_id", None):
+            resolved = getattr(reference, "resolved", None)
+            is_chatbot_reply = bool(resolved and self.user and getattr(getattr(resolved, "author", None), "id", None) == self.user.id)
+            if not is_chatbot_reply:
+                try:
+                    referenced = await message.channel.fetch_message(reference.message_id)
+                    is_chatbot_reply = bool(self.user and referenced.author.id == self.user.id)
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException, AttributeError):
+                    is_chatbot_reply = False
+
         conversation = self.multi_bot_conversation
-        if conversation is None or message.author.id != conversation.participant_id:
+        if conversation is None:
+            if not is_chatbot_reply:
+                reaction = self._select_local_reaction(message.content, scope_id=message.channel.id)
+                if reaction:
+                    await self._send_local_reaction(message.channel, reaction, scope_id=message.channel.id)
+                log.info("multi-bot message handled mode=normal_bot_reaction author_id=%s", message.author.id)
+                return True
+            if self.multi_bot_last_started_at is not None and (utc_now() - self.multi_bot_last_started_at).total_seconds() < settings.multi_bot_cooldown_seconds:
+                log.info("multi-bot chatbot reply ignored reason=cooldown")
+                return True
+            if random.random() >= settings.multi_bot_initiation_probability:
+                log.info("multi-bot message ignored reason=probability")
+                return True
+            now = utc_now()
+            conversation = MultiBotConversation(
+                participant_id=message.author.id,
+                started_at=now,
+                last_activity_at=now,
+                channel_id=message.channel.id,
+                message_count=0,
+            )
+            self.multi_bot_conversation = conversation
+        elif message.author.id != conversation.participant_id:
             log.info("multi-bot message ignored reason=no_matching_active_conversation")
             return True
         if message.id == conversation.last_message_id or not self._remember_multi_bot_message(message.id):
@@ -954,9 +976,13 @@ class MimiBot(commands.Bot):
         answer = remove_unsupported_dm_claim(answer)[: max(160, settings.multi_bot_typical_reply_length * 2)]
         if not answer:
             return True
-        content = answer
+        # Mention notifications are deliberately limited to the three-reply
+        # conversation bound and only target the verified configured bot ID.
+        mention_participant = conversation.message_count < min(3, settings.multi_bot_max_messages)
+        content = f"<@{conversation.participant_id}> {answer}" if mention_participant else answer
         try:
-            sent = await message.channel.send(content, allowed_mentions=safe_allowed_mentions())
+            mentions = self._bot_reply_mentions(conversation.participant_id) if mention_participant else safe_allowed_mentions()
+            sent = await message.channel.send(content, allowed_mentions=mentions)
         except (discord.Forbidden, discord.HTTPException, OSError) as exc:
             log.warning("multi-bot reply send failed reason=%s", type(exc).__name__)
             return True
@@ -990,13 +1016,7 @@ class MimiBot(commands.Bot):
         return bool(re.search(r"\b(latest|today|current|recent|news|look up|search|verify|as of now)\b", text.lower()))
 
     def _image_url(self, message: discord.Message) -> str | None:
-        if not self.vision_enabled:
-            return None
-        for attachment in message.attachments:
-            is_image = (attachment.content_type or "").startswith("image/") or Path(attachment.filename).suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".webp"}
-            if attachment.size <= self.settings.vision_max_attachment_bytes and is_image:
-                if attachment.url.startswith(("https://cdn.discordapp.com/", "https://media.discordapp.net/")):
-                    return attachment.url
+        # Image understanding is intentionally disabled in this build.
         return None
 
     async def _reply_context(self, message: discord.Message) -> str:
@@ -1064,6 +1084,8 @@ class MimiBot(commands.Bot):
         resolved_fact, subject = self._resolve_memory_subject(message, fact)
         if subject == "ambiguous":
             return False, resolved_fact, "ambiguous"
+        if re.match(r"(?i)^\s*(?:my|i|i'm|i am)\b", fact):
+            return False, resolved_fact, "private_fact"
         if not resolved_fact or len(resolved_fact) < 4:
             return False, resolved_fact, "invalid"
         try:
@@ -1073,13 +1095,13 @@ class MimiBot(commands.Bot):
             key = memory_key_for_fact(fact, subject_id)
             category = key.rsplit(":", 1)[-1] if key else ""
             memory_id = self.store.add_memory(
-                message.author.id, guild_id, resolved_fact,
+                self.memory_scope_user_id(message), guild_id, resolved_fact,
                 memory_key=key or "", subject_id=subject_id,
                 subject_name=resolved_fact.split(" (Discord user ID", 1)[0][:100] if subject_id else "",
                 category=category,
             )
             verified = any(int(row["id"]) == memory_id for row in self.store.list_memories(
-                message.author.id, guild_id, self.settings.memory_expiry_days, self.settings.memory_never_expire_user_ids,
+                self.memory_scope_user_id(message), guild_id, self.settings.memory_expiry_days, self.settings.memory_never_expire_user_ids,
             ))
             return verified, resolved_fact, None if verified else "not_verified"
         except Exception as exc:
@@ -1099,13 +1121,13 @@ class MimiBot(commands.Bot):
             key = memory_key_for_fact(fact, subject_id)
             category = key.rsplit(":", 1)[-1] if key else ""
             new_id = self.store.replace_memory(
-                message.author.id, guild_id, memory_id, resolved_fact,
+                self.memory_scope_user_id(message), guild_id, memory_id, resolved_fact,
                 memory_key=key or "", subject_id=subject_id,
                 subject_name=resolved_fact.split(" (Discord user ID", 1)[0][:100] if subject_id else "",
                 category=category,
             )
             verified = new_id is not None and any(int(row["id"]) == new_id for row in self.store.list_memories(
-                message.author.id, guild_id, self.settings.memory_expiry_days, self.settings.memory_never_expire_user_ids,
+                self.memory_scope_user_id(message), guild_id, self.settings.memory_expiry_days, self.settings.memory_never_expire_user_ids,
             ))
             return verified, resolved_fact, None if verified else "not_verified"
         except Exception as exc:
@@ -1118,7 +1140,7 @@ class MimiBot(commands.Bot):
             if not intent.query:
                 await message.reply("Which memory should I forget?", mention_author=False, allowed_mentions=safe_allowed_mentions())
                 return
-            matches = self.store.find_memory_matches(message.author.id, guild_id, intent.query)
+            matches = self.store.find_memory_matches(self.memory_scope_user_id(message), guild_id, intent.query)
             if len(matches) != 1:
                 response = "I couldn’t identify exactly one memory to forget." if matches else "I couldn’t find that memory."
                 await message.reply(response, mention_author=False, allowed_mentions=safe_allowed_mentions())
@@ -1136,6 +1158,9 @@ class MimiBot(commands.Bot):
             return
         if error == "invalid":
             await message.reply("What exactly should I remember?", mention_author=False, allowed_mentions=safe_allowed_mentions())
+            return
+        if error == "private_fact":
+            await message.reply("I only keep shared public server facts, not private member details.", mention_author=False, allowed_mentions=safe_allowed_mentions())
             return
         response = f"Got it! I saved: {fact}" if verified else "I couldn’t save that just now—my memory storage failed."
         await message.reply(response, mention_author=False, allowed_mentions=safe_allowed_mentions())
@@ -1291,11 +1316,10 @@ class MimiBot(commands.Bot):
         if message.author.bot:
             await self._handle_multi_bot_message(message)
             return
+        if message.guild is None:
+            return
         if message.guild and message.channel.id in self.settings.excluded_channel_ids:
             return
-        await self._moderation_alert(message)
-        if message.guild and message.author.id == self.settings.inactivity_owner_id and message.guild.id == self.settings.inactivity_guild_id:
-            self.store.record_owner_activity(message.guild.id, message.author.id, datetime.now(timezone.utc).isoformat())
         mentioned = self.user in message.mentions if self.user else False
         replied_to_me = False
         if message.reference and message.reference.message_id and self.user:
@@ -1307,7 +1331,7 @@ class MimiBot(commands.Bot):
                 except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                     pass
         random_trigger = bool(message.guild) and random.random() < self.settings.random_probability
-        dm_trigger = message.guild is None
+        dm_trigger = False
         reaction_request = self._reaction_request_category(message.content)
         memory_intent = detect_memory_intent(message.content)
         pending_task = self.agent.pending_for(message)
@@ -1351,27 +1375,19 @@ class MimiBot(commands.Bot):
         text = message.content[: self.settings.max_input_chars]
         context = await self._reply_context(message)
         guild_id = message.guild.id if message.guild else 0
-        memories = self.store.list_memories(message.author.id, guild_id, self.settings.memory_expiry_days,
+        memory_user_id = self.memory_scope_user_id(message)
+        memories = self.store.list_memories(memory_user_id, guild_id, self.settings.memory_expiry_days,
                                             self.settings.memory_never_expire_user_ids)
         if first_contact is None:
             first_contact = self.store.interaction_state(message.author.id, guild_id) is None
         first_contact = first_contact and not memories
         memories = self._relevant_memories(memories, text)
         memory_text = "\n".join(f"- {row['fact']}" for row in memories)
-        image_url = self._image_url(message)
-        if self._image_needs_resend(message, image_url):
-            await message.reply(
-                "I couldn’t access the image—could you resend it?",
-                mention_author=False,
-                allowed_mentions=safe_allowed_mentions(),
-            )
-            return
+        image_url = None
         wants_search = self._should_search(text)
         status = self.usage_status()
         if status["mode"] == "low" or status["web_searches"] >= self.settings.max_web_searches_per_day:
             wants_search = False
-        if status["mode"] == "low" or status["vision_requests"] >= self.settings.max_vision_requests_per_day:
-            image_url = None
         user_content: str | list[dict] = text or "Please look at the attached image."
         if image_url:
             user_content = [{"type": "text", "text": ((context + "\n") if context else "") + (user_content if isinstance(user_content, str) else text)},
@@ -1423,9 +1439,6 @@ class MimiBot(commands.Bot):
         history = self.histories[self._history_key(message)]
         history.append({"role": "user", "content": text[:800]})
         history.append({"role": "assistant", "content": answer[:800]})
-        fact = self._extract_memory(text)
-        if fact:
-            self.store.add_memory(message.author.id, guild_id, fact)
         self.store.touch([row["id"] for row in memories])
         if search_info.get("status") not in (None, "ok"):
             answer += f"\n\n_{search_info.get('notice', 'Live search was unavailable; this answer may not be current.')}_"
@@ -1471,25 +1484,15 @@ async def help_command(interaction: discord.Interaction):
         )
 
 
-@bot.tree.command(name="dashboard", description="Open Mimi's owner-only Control Center")
-async def dashboard_command(interaction: discord.Interaction):
-    if not bot.is_owner_id(interaction.user.id):
-        await interaction.response.send_message("Owner-only command.", ephemeral=True, allowed_mentions=safe_allowed_mentions())
-        return
-    await interaction.response.send_message(
-        embed=dashboard_embed(bot), view=DashboardView(bot), ephemeral=True,
-        allowed_mentions=safe_allowed_mentions(),
-    )
-
-
 @bot.tree.command(name="memory", description="Show your saved Mimi memories privately")
 @app_commands.describe(page="Page number, 1-based")
 async def memory_command(interaction: discord.Interaction, page: int = 1):
     guild_id = interaction.guild.id if interaction.guild else 0
     page = max(1, page)
     page_size = 10
-    total = bot.store.count_memories(interaction.user.id, guild_id)
-    rows = bot.store.list_memories(interaction.user.id, guild_id, bot.settings.memory_expiry_days, bot.settings.memory_never_expire_user_ids, limit=page_size, offset=(page - 1) * page_size)
+    scope_user_id = 0
+    total = bot.store.count_memories(scope_user_id, guild_id)
+    rows = bot.store.list_memories(scope_user_id, guild_id, bot.settings.memory_expiry_days, bot.settings.memory_never_expire_user_ids, limit=page_size, offset=(page - 1) * page_size)
     total_pages = max(1, (total + page_size - 1) // page_size)
     if page > total_pages:
         body = f"That page does not exist. You have {total_pages} page(s)."
@@ -1506,7 +1509,7 @@ async def memory_command(interaction: discord.Interaction, page: int = 1):
 @app_commands.describe(memory_id="The ID shown by /memory")
 async def forget_command(interaction: discord.Interaction, memory_id: int):
     guild_id = interaction.guild.id if interaction.guild else 0
-    ok = bot.store.delete_memory(interaction.user.id, guild_id, memory_id)
+    ok = bot.store.delete_memory(0, guild_id, memory_id)
     await interaction.response.send_message(
         "Memory deleted." if ok else "That memory was not found.",
         ephemeral=bool(interaction.guild), allowed_mentions=safe_allowed_mentions(),
@@ -1521,7 +1524,7 @@ async def forget_all_command(interaction: discord.Interaction, confirm: bool = F
             ephemeral=bool(interaction.guild), allowed_mentions=safe_allowed_mentions(),
         ); return
     guild_id = interaction.guild.id if interaction.guild else 0
-    count = bot.store.delete_all(interaction.user.id, guild_id)
+    count = bot.store.delete_all(0, guild_id)
     await interaction.response.send_message(
         f"Deleted {count} memories.", ephemeral=bool(interaction.guild),
         allowed_mentions=safe_allowed_mentions(),
@@ -1537,20 +1540,6 @@ async def diagnostics_command(interaction: discord.Interaction):
         ); return
     await interaction.response.send_message(
         bot.diagnostics_text(), ephemeral=True,
-        allowed_mentions=safe_allowed_mentions(),
-    )
-
-
-@bot.tree.command(name="settings", description="Owner-only interactive control panel")
-async def settings_command(interaction: discord.Interaction):
-    if not bot.is_owner_id(interaction.user.id):
-        await interaction.response.send_message(
-            "Owner-only command.", ephemeral=True,
-            allowed_mentions=safe_allowed_mentions(),
-        ); return
-    embed = discord.Embed(title="Mimi control center", description=bot.diagnostics_text(), color=discord.Color.pink())
-    await interaction.response.send_message(
-        embed=embed, view=OwnerView(bot), ephemeral=True,
         allowed_mentions=safe_allowed_mentions(),
     )
 

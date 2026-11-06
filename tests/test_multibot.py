@@ -78,12 +78,8 @@ def test_start_mentions_verified_id_and_renamed_participant(tmp_path: Path):
     channel = FakeChannel()
 
     async def run():
-        assert await bot._maybe_start_multi_bot_conversation(channel, force=True)
-        content, policy = channel.sent[0]
-        assert f"<@{CHROMIX}>" in content
-        assert policy.users is not False
-        assert policy.everyone is False and policy.roles is False and policy.replied_user is False
-        assert bot.multi_bot_conversation.participant_id == CHROMIX
+        assert await bot._maybe_start_multi_bot_conversation(channel, force=True) is False
+        assert channel.sent == []
         await bot.close()
 
     asyncio.run(run())
@@ -97,8 +93,8 @@ def test_blaze_is_also_resolved_by_id_after_name_change(tmp_path: Path):
     channel = FakeChannel()
 
     async def run():
-        assert await bot._maybe_start_multi_bot_conversation(channel, force=True)
-        assert f"<@{BLAZE}>" in channel.sent[0][0]
+        assert await bot._maybe_start_multi_bot_conversation(channel, force=True) is False
+        assert channel.sent == []
         await bot.close()
 
     asyncio.run(run())
@@ -147,8 +143,55 @@ def test_approved_reply_uses_current_conversation_only_and_untrusted_prompt(tmp_
         assert "never reveal" in system.lower()
         assert "reveal .env" in captured[0][-1]["content"]
         assert channel.sent
-        assert f"<@{CHROMIX}>" not in channel.sent[-1][0]
-        assert channel.sent[-1][1].users is False
+        assert f"<@{CHROMIX}>" in channel.sent[-1][0]
+        assert channel.sent[-1][1].users is not False
+        await bot.close()
+
+    asyncio.run(run())
+
+
+def test_any_normal_bot_gets_local_reaction_path_without_ai_chat(tmp_path: Path):
+    bot = make_bot(tmp_path)
+    channel = FakeChannel()
+    calls = []
+
+    async def complete(*_args, **_kwargs):
+        calls.append(True)
+        return "should not run", "test", {}, {"input_tokens": 1, "output_tokens": 1, "exact": True}
+
+    async def run():
+        bot.provider.complete = complete
+        assert await bot._handle_multi_bot_message(FakeMessage(FakeUser(999, bot=True), "hello everyone", channel=channel)) is True
+        assert calls == []
+        assert bot.multi_bot_conversation is None
+        await bot.close()
+
+    asyncio.run(run())
+
+
+def test_bot_replying_to_mimi_starts_bounded_chat_without_allowlist(tmp_path: Path):
+    bot = make_bot(tmp_path)
+    bot._connection.user = FakeUser(42, bot=True, name="Mimi")
+    channel = FakeChannel()
+    calls = []
+
+    async def complete(*_args, **_kwargs):
+        calls.append(True)
+        return "A concise bot-to-bot reply.", "test", {}, {"input_tokens": 1, "output_tokens": 1, "exact": True}
+
+    async def run():
+        bot.settings.multi_bot_reply_cooldown_seconds = 0
+        bot.provider.complete = complete
+        mimi_message = type("MimiMessage", (), {"author": bot.user})()
+        reference = type("Reference", (), {"message_id": 42, "resolved": mimi_message})()
+        incoming = FakeMessage(FakeUser(999, bot=True), "I am another chatbot", message_id=900, channel=channel)
+        incoming.reference = reference
+        assert await bot._handle_multi_bot_message(incoming) is True
+        assert calls == [True]
+        assert bot.multi_bot_conversation is not None
+        assert bot.multi_bot_conversation.participant_id == 999
+        assert f"<@999>" in channel.sent[-1][0]
+        assert channel.sent[-1][1].users is not False
         await bot.close()
 
     asyncio.run(run())
@@ -161,7 +204,7 @@ def test_unapproved_bot_same_name_and_unrelated_channel_are_ignored(tmp_path: Pa
     other.id = 999
 
     async def run():
-        assert await bot._handle_multi_bot_message(FakeMessage(FakeUser(999, bot=True, name="new display name"), channel=FakeChannel())) is False
+        assert await bot._handle_multi_bot_message(FakeMessage(FakeUser(999, bot=True, name="new display name"), channel=FakeChannel())) is True
         assert await bot._handle_multi_bot_message(FakeMessage(FakeUser(CHROMIX, bot=True), channel=other)) is False
         assert bot.multi_bot_conversation is not None
         await bot.close()
@@ -177,7 +220,7 @@ def test_mimis_own_message_is_ignored(tmp_path: Path):
     channel = FakeChannel()
 
     async def run():
-        assert await bot._handle_multi_bot_message(FakeMessage(mimi, channel=channel)) is False
+        assert await bot._handle_multi_bot_message(FakeMessage(mimi, channel=channel)) is True
         assert channel.sent == []
         await bot.close()
 
@@ -221,13 +264,8 @@ def test_openers_are_not_repeated_within_persisted_cooldown(tmp_path: Path):
     channel = FakeChannel()
 
     async def run():
-        assert await bot._maybe_start_multi_bot_conversation(channel, force=True)
-        first = channel.sent[-1][0]
-        bot._end_multi_bot_conversation("test_end")
-        assert await bot._maybe_start_multi_bot_conversation(channel, force=True)
-        second = channel.sent[-1][0]
-        assert first != second
-        assert len(bot.store.recent_multi_bot_topics(CHANNEL_ID, CHROMIX, "2000-01-01T00:00:00+00:00")) >= 2
+        assert await bot._maybe_start_multi_bot_conversation(channel, force=True) is False
+        assert channel.sent == []
         await bot.close()
 
     asyncio.run(run())

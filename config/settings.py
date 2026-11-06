@@ -80,6 +80,8 @@ class Settings:
     groq_base_url: str = "https://api.groq.com/openai/v1"
     groq_fallback_enabled: bool = True
     groq_supports_vision: bool = False
+    primary_provider: str = "groq"
+    fallback_provider: str = "xkiro"
     owner_ids: frozenset[int] = field(default_factory=frozenset)
     memory_never_expire_user_ids: frozenset[int] = field(default_factory=frozenset)
     excluded_channel_ids: frozenset[int] = field(default_factory=frozenset)
@@ -93,7 +95,7 @@ class Settings:
     max_output_tokens: int = 300
     request_timeout_seconds: float = 25.0
     max_retries: int = 2
-    vision_default: bool = True
+    vision_default: bool = False
     bot_timezone: str = "Asia/Kolkata"
     daily_token_budget: int = 1_000_000
     budget_safety_margin: float = 0.85
@@ -128,7 +130,7 @@ class Settings:
     multi_bot_initiation_probability: float = 0.02
     multi_bot_cooldown_seconds: float = 21600.0
     multi_bot_quiet_seconds: float = 600.0
-    multi_bot_max_messages: int = 5
+    multi_bot_max_messages: int = 3
     multi_bot_inactivity_seconds: float = 900.0
     multi_bot_max_duration_seconds: float = 3600.0
     multi_bot_response_creativity: float = 0.7
@@ -162,6 +164,8 @@ class Settings:
             groq_base_url=os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1").rstrip("/"),
             groq_fallback_enabled=os.getenv("GROQ_FALLBACK_ENABLED", "true").lower() in {"1", "true", "yes"},
             groq_supports_vision=os.getenv("GROQ_SUPPORTS_VISION", "false").lower() in {"1", "true", "yes"},
+            primary_provider=os.getenv("AI_PRIMARY_PROVIDER", "groq").strip().lower(),
+            fallback_provider=os.getenv("AI_FALLBACK_PROVIDER", "xkiro").strip().lower(),
             owner_ids=_csv_ints(os.getenv("OWNER_DISCORD_IDS", "")),
             memory_never_expire_user_ids=_csv_ints(os.getenv("MEMORY_NEVER_EXPIRE_USER_IDS", "")),
             excluded_channel_ids=_csv_ints(os.getenv("EXCLUDED_CHANNEL_IDS", "")),
@@ -175,7 +179,7 @@ class Settings:
             max_output_tokens=max(64, _env_int("MAX_OUTPUT_TOKENS", 300)),
             request_timeout_seconds=max(5.0, _env_float("XKIRO_TIMEOUT_SECONDS", 25)),
             max_retries=min(4, max(0, _env_int("XKIRO_MAX_RETRIES", 2))),
-            vision_default=_env_bool("VISION_DEFAULT_ENABLED", True),
+            vision_default=False,
             bot_timezone=os.getenv("BOT_TIMEZONE", "Asia/Kolkata").replace("Asia/Calcutta", "Asia/Kolkata"),
             daily_token_budget=max(1000, _env_int("DAILY_TOKEN_BUDGET", 1000000)),
             budget_safety_margin=min(0.99, max(0.5, _env_float("BUDGET_SAFETY_MARGIN", 0.85))),
@@ -210,7 +214,7 @@ class Settings:
             multi_bot_initiation_probability=min(1.0, max(0.0, _env_float("MULTI_BOT_INITIATION_PROBABILITY", 0.02))),
             multi_bot_cooldown_seconds=max(0.0, _env_float("MULTI_BOT_COOLDOWN_SECONDS", 21600)),
             multi_bot_quiet_seconds=max(0.0, _env_float("MULTI_BOT_QUIET_SECONDS", 600)),
-            multi_bot_max_messages=min(6, max(3, _env_int("MULTI_BOT_MAX_MESSAGES", 5))),
+            multi_bot_max_messages=min(5, max(3, _env_int("MULTI_BOT_MAX_MESSAGES", 3))),
             multi_bot_inactivity_seconds=max(1.0, _env_float("MULTI_BOT_INACTIVITY_SECONDS", 900)),
             multi_bot_max_duration_seconds=max(60.0, _env_float("MULTI_BOT_MAX_DURATION_SECONDS", 3600)),
             multi_bot_response_creativity=min(1.0, max(0.0, _env_float("MULTI_BOT_RESPONSE_CREATIVITY", 0.7))),

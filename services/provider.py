@@ -207,7 +207,7 @@ class GroqProvider(XKiroProvider):
 
 
 class AIProviderRouter:
-    """Use xKiro first, then one Groq attempt only for retryable xKiro failures."""
+    """Route through the configured primary, then one safe fallback attempt."""
 
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -231,33 +231,45 @@ class AIProviderRouter:
                        max_tokens: int | None = None) -> tuple[str, str, dict[str, Any], dict[str, int | bool]]:
         self.last_fallback_attempted = False
         self.last_fallback_succeeded = False
+        providers = {
+            "groq": self.groq,
+            "xkiro": self.xkiro,
+        }
+        primary_name = self.settings.primary_provider if self.settings.primary_provider in providers else "groq"
+        fallback_name = self.settings.fallback_provider if self.settings.fallback_provider in providers else "xkiro"
+        primary = providers[primary_name]
+        if primary is None:
+            raise ProviderError("Primary provider is not configured", category="authentication")
         try:
-            result = await self.xkiro.complete(
-                messages, use_web_search=use_web_search, model=model,
+            result = await primary.complete(
+                messages, use_web_search=use_web_search if primary_name == "xkiro" else False,
+                model=model if primary_name == "xkiro" else None,
                 temperature=temperature, max_tokens=max_tokens,
             )
-            self.last_provider = f"xKiro/{result[1]}"
-            return result
-        except ProviderError as xkiro_error:
-            self.last_provider = "xKiro/error"
-            if not xkiro_error.retryable or not self.groq_configured:
-                raise
-            if any(isinstance(item.get("content"), list) for item in messages) and not self.settings.groq_supports_vision:
-                log.warning("Groq fallback skipped category=invalid_request reason=vision_not_enabled")
+            self.last_provider = f"{primary_name}/{result[1]}"
+            return result[0], f"{primary_name}/{result[1]}", result[2], result[3]
+        except ProviderError as primary_error:
+            self.last_provider = f"{primary_name}/error"
+            fallback = providers.get(fallback_name)
+            if not primary_error.retryable or fallback is None or fallback_name == primary_name:
                 raise
             self.last_fallback_attempted = True
-            log.warning("Provider fallback route=xKiro->Groq category=%s status=%s code=%s request_id=%s attempted=true", xkiro_error.category, xkiro_error.status_code, xkiro_error.provider_code, xkiro_error.request_id)
+            log.warning("Provider fallback route=%s->%s category=%s status=%s code=%s request_id=%s attempted=true",
+                        primary_name, fallback_name, primary_error.category, primary_error.status_code,
+                        primary_error.provider_code, primary_error.request_id)
             try:
-                answer, used_model, search_info, usage = await self.groq.complete(
+                answer, used_model, search_info, usage = await fallback.complete(
                     messages, use_web_search=False, model=None,
                     temperature=temperature, max_tokens=max_tokens,
                 )
                 if use_web_search:
                     search_info = {"status": "unavailable", "notice": "Live search was unavailable on the fallback provider."}
-                self.last_provider = f"Groq/{used_model}"
+                self.last_provider = f"{fallback_name}/{used_model}"
                 self.last_fallback_succeeded = True
-                return answer, f"groq/{used_model}", search_info, usage
-            except ProviderError as groq_error:
-                self.last_provider = "Groq/error"
-                log.warning("Provider fallback failed route=Groq category=%s status=%s code=%s request_id=%s attempted=true", groq_error.category, groq_error.status_code, groq_error.provider_code, groq_error.request_id)
+                return answer, f"{fallback_name}/{used_model}", search_info, usage
+            except ProviderError as fallback_error:
+                self.last_provider = f"{fallback_name}/error"
+                log.warning("Provider fallback failed route=%s category=%s status=%s code=%s request_id=%s attempted=true",
+                            fallback_name, fallback_error.category, fallback_error.status_code,
+                            fallback_error.provider_code, fallback_error.request_id)
                 raise
