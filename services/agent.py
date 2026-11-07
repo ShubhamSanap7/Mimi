@@ -312,7 +312,12 @@ class AgentCore:
             result = CapabilityResult(False, "I couldn't complete that action because Discord rejected it or it was unavailable.")
         if row:
             self.bot.store.finish_pending_task(str(row["task_id"]), "completed" if result.success else "failed")
-        await self._reply(message, result.message)
+        # A successfully attached GIF is already the user-facing response;
+        # avoid adding a redundant confirmation message beneath it. Failures
+        # still need a concise explanation so the user knows the action did
+        # not complete.
+        if not (capability.name == "send_reaction" and result.success):
+            await self._reply(message, result.message)
         return True
 
     @staticmethod

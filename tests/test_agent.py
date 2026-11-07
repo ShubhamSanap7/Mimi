@@ -128,7 +128,7 @@ def test_explicit_gif_request_uses_registered_local_capability(tmp_path):
         assert calls["send"][1] == selected
         assert calls["send"][2] is True
         assert calls["send"][4] is message
-        assert "Sent a matching local GIF" in message.replies[0][0]
+        assert message.replies == []
         assert "send_reaction" in bot._identity_prompt()
         await bot.close()
 
