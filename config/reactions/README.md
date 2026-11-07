@@ -22,6 +22,7 @@ The curation record is retained in `tools/curate_real_reactions.py`; it download
 
 - Explicit requests such as `send me a shocked anime GIF` are mapped locally to tags and do not consume AI tokens.
 - Generic requests such as `send me a GIF` choose from the valid local collection.
+- Natural category names such as `hug`, `slap`, `grin`, `greet`, and `angry` are mapped to the closest validated local reaction pool. A requested category uses at most eight rotating assets so one large tag cannot dominate selection; the existing files are retained and are not deleted automatically.
 - Ordinary messages only receive an occasional contextual reaction when `REACTION_PROBABILITY` permits it and the text has a clear matching emotion. Explanations and serious distress do not get random celebratory media.
 - Automatic reactions use a per-channel cooldown and recent-path avoidance. Explicit requests bypass the automatic cooldown but still use safe validation.
 - Uploads use `discord.File(...)`; failures are logged by exception class and do not expose private conversation content.

@@ -14,16 +14,21 @@ from PIL import Image, UnidentifiedImageError
 
 MAX_REACTION_FILE_BYTES = 8 * 1024 * 1024
 MAX_REACTION_DIMENSION = 4096
+MAX_CATEGORY_ASSETS = 8
 ALLOWED_SUFFIXES = frozenset({".gif", ".png", ".jpg", ".jpeg", ".webp"})
 MANIFEST_FILENAME = "manifest.json"
 
-ACTION_WORDS = r"\b(send|show|give|find|want|need|drop|post|share|use|express|react|respond|reply)\b"
+ACTION_WORDS = r"\b(send|show|give|find|want|need|drop|post|share|use|express|react|respond|reply|greet)\b"
 MEDIA_WORDS = r"\b(gif|reaction|meme|image|picture|photo|pic)\b"
 
 # These rules are intentionally local and conservative. They are used both for
 # explicit media requests and for occasional contextual reactions after a text
 # reply; neither path needs another model call.
 CATEGORY_PATTERN_SOURCES: tuple[tuple[str, str], ...] = (
+    ("hug", r"\b(hug|hugs|hugging|cuddle|cuddles|embrace)\b"),
+    ("slap", r"\b(slap|slaps|slapped|smack|bonk)\b"),
+    ("grin", r"\b(grin|grinning|big smile)\b"),
+    ("greet", r"\b(greet|greeting)\b"),
     ("shock", r"\b(shock(?:ed)?|surpris(?:e|ed|ing)|unexpected|wtf|no way|seriously|you did what)\b"),
     ("excited", r"\b(excited|exciting|excitement|hype|can't wait|cannot wait|let's go|lets go)\b"),
     ("happy", r"\b(happy|glad|yay|awesome|great|congrats?|won|joy|thank(?:s| you))\b"),
@@ -88,6 +93,11 @@ CATEGORY_PATTERNS = tuple((name, re.compile(pattern, re.IGNORECASE)) for name, p
 # Conversation moods often use semantic names that are not literal asset tags.
 # These aliases keep the selector broad enough to use the full local library.
 CATEGORY_ALIASES: dict[str, tuple[str, ...]] = {
+    "hug": ("hug", "supportive", "happy", "smile", "clap", "thumbsup"),
+    "slap": ("slap", "angry", "frustrated", "pout", "facepalm", "mischievous"),
+    "grin": ("grin", "smile", "happy", "smug", "mischievous"),
+    "greet": ("greet", "greeting", "wave", "smile", "happy"),
+    "angry": ("angry", "frustrated", "pout", "facepalm"),
     "gaming_victory": ("gaming_victory", "celebrating", "happy", "proud", "joy"),
     "achievement_unlocked": ("achievement_unlocked", "celebrating", "happy", "proud", "joy"),
     "excited": ("excited", "celebrating", "happy", "joy", "yay"),
@@ -470,6 +480,11 @@ class ReactionLibrary:
             candidates = [asset for asset in assets if allowed_tags.intersection(asset.tags)]
             if not candidates:
                 return None
+            # Keep each semantic category small enough that rotation actually
+            # reaches the library instead of repeatedly favoring a huge tag
+            # such as ``happy``. Assets remain on disk; this is a selection
+            # pool limit, not destructive cleanup.
+            candidates = sorted(candidates, key=lambda asset: asset.relative_path)[:MAX_CATEGORY_ASSETS]
         else:
             candidates = assets
         recent = set(recent_paths)

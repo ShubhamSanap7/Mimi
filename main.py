@@ -893,9 +893,34 @@ class MimiBot(commands.Bot):
         conversation = self.multi_bot_conversation
         if conversation is None:
             if not is_chatbot_reply:
-                reaction = self._select_local_reaction(message.content, scope_id=message.channel.id)
+                if not self._remember_multi_bot_message(message.id):
+                    log.info("multi-bot message ignored reason=duplicate_normal_reaction")
+                    return True
+                requested_category = self._reaction_request_category(message.content)
+                has_reaction_attachment = self._has_reaction_attachment(message)
+                if requested_category or has_reaction_attachment:
+                    category = requested_category or self.reaction_library.infer_category(message.content) or "auto"
+                    # Explicit wording is an intentional request and may use
+                    # the existing explicit-request path. An attachment from a
+                    # bot is only an automatic visual cue, so normal serious,
+                    # probability, cooldown, and asset safeguards still apply.
+                    explicit_request = requested_category is not None
+                    reaction = self._select_local_reaction(
+                        message.content,
+                        requested_category=category,
+                        force=explicit_request,
+                        scope_id=message.channel.id,
+                    )
+                else:
+                    reaction = self._select_local_reaction(message.content, scope_id=message.channel.id)
                 if reaction:
-                    await self._send_local_reaction(message.channel, reaction, scope_id=message.channel.id, reply_to=message)
+                    await self._send_local_reaction(
+                        message.channel,
+                        reaction,
+                        force=bool(requested_category),
+                        scope_id=message.channel.id,
+                        reply_to=message,
+                    )
                 log.info("multi-bot message handled mode=normal_bot_reaction author_id=%s", message.author.id)
                 return True
             if self.multi_bot_last_started_at is not None and (utc_now() - self.multi_bot_last_started_at).total_seconds() < settings.multi_bot_cooldown_seconds:
@@ -1224,6 +1249,16 @@ class MimiBot(commands.Bot):
 
     def _reaction_request_category(self, text: str) -> str | None:
         return self.reaction_library.request_category(text)
+
+    @staticmethod
+    def _has_reaction_attachment(message: discord.Message) -> bool:
+        """Identify an incoming image/GIF without downloading or trusting it."""
+        for attachment in getattr(message, "attachments", ()) or ():
+            content_type = str(getattr(attachment, "content_type", "") or "").lower()
+            filename = str(getattr(attachment, "filename", "") or "").lower()
+            if content_type.startswith("image/") or Path(filename).suffix in {".gif", ".png", ".jpg", ".jpeg", ".webp"}:
+                return True
+        return False
 
     def _valid_reaction_file(self, path: Path) -> bool:
         return bool(self.reaction_library.validate_file(path).get("valid"))

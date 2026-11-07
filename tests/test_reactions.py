@@ -45,6 +45,10 @@ def test_category_matching_and_generic_request_are_local():
     assert ReactionLibrary.request_category("send me a shocked anime GIF") == "shock"
     assert ReactionLibrary.request_category("send me a GIF") == "auto"
     assert ReactionLibrary.request_category("send me a wave") == "wave"
+    assert ReactionLibrary.request_category("give me a hug GIF") == "hug"
+    assert ReactionLibrary.request_category("show me a slap GIF") == "slap"
+    assert ReactionLibrary.request_category("use a grin GIF") == "grin"
+    assert ReactionLibrary.request_category("greet me with a GIF") == "greet"
     assert ReactionLibrary.request_category("explain this code") is None
     assert ReactionLibrary.infer_category("I'm having a terrible day") == "sad"
     assert ReactionLibrary.infer_category("Explain this code") is None
@@ -96,6 +100,21 @@ def test_rotation_uses_multiple_matching_assets_before_repeating(tmp_path: Path)
     library.write_manifest(metadata)
     selected = [library.choose("happy", requested_category="happy", selection_key="channel-1").relative_path for _ in range(4)]
     assert len(set(selected)) == 4
+
+
+def test_requested_category_pool_is_capped_without_deleting_assets(tmp_path: Path):
+    root = tmp_path / "reactions"
+    root.mkdir()
+    metadata = {}
+    for index in range(12):
+        name = f"happy_{index:02d}.gif"
+        write_gif(root / name, (index * 15, 80, 160))
+        metadata[name] = {"tags": ["happy"], "category": "anime"}
+    library = ReactionLibrary(root)
+    library.write_manifest(metadata)
+    selected = [library.choose("happy", requested_category="happy", selection_key="channel-1").relative_path for _ in range(8)]
+    assert len(set(selected)) == 8
+    assert len(library.discover_assets(library.manifest_metadata())) == 12
 
 
 def test_invalid_signatures_and_oversized_files_are_rejected(tmp_path: Path):

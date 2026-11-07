@@ -169,6 +169,62 @@ def test_any_normal_bot_gets_local_reaction_path_without_ai_chat(tmp_path: Path)
     asyncio.run(run())
 
 
+def test_bot_gif_request_uses_matching_local_reaction_once(tmp_path: Path):
+    bot = make_bot(tmp_path)
+    channel = FakeChannel()
+    selected = Path("config/reactions/anime/emotions/happy_01.gif")
+    calls = []
+
+    def select(text, *, requested_category, force, scope_id, context=""):
+        calls.append(("select", requested_category, force))
+        return selected
+
+    async def send(channel_arg, reaction, *, force, scope_id, reply_to):
+        calls.append(("send", reaction, force, reply_to.id))
+        return True
+
+    bot._select_local_reaction = select
+    bot._send_local_reaction = send
+
+    async def run():
+        message = FakeMessage(FakeUser(999, bot=True), "give me a happy GIF", message_id=501, channel=channel)
+        message.attachments = []
+        assert await bot._handle_multi_bot_message(message) is True
+        assert calls == [("select", "happy", True), ("send", selected, True, 501)]
+        assert await bot._handle_multi_bot_message(message) is True
+        assert len(calls) == 2
+        await bot.close()
+
+    asyncio.run(run())
+
+
+def test_bot_gif_attachment_can_trigger_contextual_local_reaction(tmp_path: Path):
+    bot = make_bot(tmp_path)
+    channel = FakeChannel()
+    selected = Path("config/reactions/anime/emotions/shock_01.gif")
+    calls = []
+
+    def select(text, *, requested_category, force, scope_id, context=""):
+        calls.append(("select", requested_category, force))
+        return selected
+
+    async def send(channel_arg, reaction, *, force, scope_id, reply_to):
+        calls.append(("send", reaction, force, reply_to.id))
+        return True
+
+    bot._select_local_reaction = select
+    bot._send_local_reaction = send
+
+    async def run():
+        message = FakeMessage(FakeUser(999, bot=True), "look at this", message_id=502, channel=channel)
+        message.attachments = [type("Attachment", (), {"content_type": "image/gif", "filename": "reaction.gif"})()]
+        assert await bot._handle_multi_bot_message(message) is True
+        assert calls == [("select", "auto", False), ("send", selected, False, 502)]
+        await bot.close()
+
+    asyncio.run(run())
+
+
 def test_bot_replying_to_mimi_starts_bounded_chat_without_allowlist(tmp_path: Path):
     bot = make_bot(tmp_path)
     bot._connection.user = FakeUser(42, bot=True, name="Mimi")
