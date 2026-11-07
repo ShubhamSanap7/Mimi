@@ -237,6 +237,7 @@ class AgentCore:
         self.planner = NaturalLanguagePlanner()
         self.registry = CapabilityRegistry()
         self.registry.register(Capability("send_message", "Send one user-requested Discord message in the current authorized scope.", ("content",), ("destination_id",), "low", False, False, self._send_message))
+        self.registry.register(Capability("send_reaction", "Select and attach one validated local GIF reaction for an explicit request.", ("category",), (), "low", False, True, self._send_reaction))
         self.registry.register(Capability("create_poll", "Create a native Discord poll with validated options and duration.", ("question", "options"), ("duration_seconds",), "low", False, False, self._create_poll))
         self.registry.register(Capability("schedule_followup", "Schedule one bounded follow-up message in a guild channel.", ("content", "delay_seconds"), (), "low", False, False, self._schedule_followup))
         self.registry.register(Capability("memory_correction", "Atomically delete one identified memory and save its corrected replacement.", ("delete_query", "new_fact"), (), "medium", False, False, self._memory_correction))
@@ -256,7 +257,9 @@ class AgentCore:
         return next((key for key in self.bot.runtime_settings.specs if re.search(rf"\b{re.escape(key)}\b", text, re.I)), None)
 
     def is_candidate(self, text: str) -> bool:
-        return self.planner.is_candidate(text) or self._setting_key_in_text(text) is not None
+        reaction_library = getattr(self.bot, "reaction_library", None)
+        reaction_request = bool(reaction_library and reaction_library.request_category(text))
+        return self.planner.is_candidate(text) or reaction_request or self._setting_key_in_text(text) is not None
 
     async def handle_message(self, message: Any) -> bool:
         guild_id = getattr(getattr(message, "guild", None), "id", 0) or 0
@@ -268,6 +271,11 @@ class AgentCore:
             setting_key = self._setting_key_in_text(message.content)
             if setting_key:
                 plan = ActionPlan("read_settings", {"text": message.content})
+        if not plan.capability and not plan.cancel:
+            reaction_library = getattr(self.bot, "reaction_library", None)
+            category = reaction_library.request_category(message.content) if reaction_library else None
+            if category:
+                plan = ActionPlan("send_reaction", {"category": category})
         if not plan.capability and not plan.cancel:
             return False
         if plan.cancel:
@@ -352,6 +360,33 @@ class AgentCore:
             return CapabilityResult(False, "The message must be between 1 and 2000 characters.")
         sent = await channel.send(content, allowed_mentions=discord.AllowedMentions.none())
         return CapabilityResult(True, f"Sent it successfully (message ID {getattr(sent, 'id', 'unknown')}).", {"message_id": getattr(sent, "id", None)})
+
+    async def _send_reaction(self, _core: Any, args: dict[str, Any], message: Any) -> CapabilityResult:
+        """Execute an explicit GIF request through Mimi's existing safe sender.
+
+        Selection and upload remain local Python operations. The model cannot
+        provide a filesystem path or bypass serious-context, validation,
+        cooldown, duplicate, or mention protections.
+        """
+        category = str(args.get("category") or "auto").strip().lower()
+        reaction = self.bot._select_local_reaction(
+            message.content,
+            requested_category=category,
+            force=True,
+            scope_id=message.channel.id,
+        )
+        if reaction is None:
+            return CapabilityResult(False, "I don't have a suitable local GIF for that request yet.")
+        sent = await self.bot._send_local_reaction(
+            message.channel,
+            reaction,
+            force=True,
+            scope_id=message.channel.id,
+            reply_to=message,
+        )
+        if not sent:
+            return CapabilityResult(False, "I found a GIF, but Discord couldn't accept the attachment right now.")
+        return CapabilityResult(True, "Sent a matching local GIF reaction.", {"asset": reaction.name})
 
     async def _create_poll(self, _core: Any, args: dict[str, Any], message: Any) -> CapabilityResult:
         if not getattr(message, "guild", None):

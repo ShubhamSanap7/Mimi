@@ -103,6 +103,38 @@ def test_send_message_is_real_and_mention_safe(tmp_path):
     asyncio.run(run())
 
 
+def test_explicit_gif_request_uses_registered_local_capability(tmp_path):
+    bot = make_bot(tmp_path)
+    selected = Path("config/reactions/anime/emotions/happy_01.gif")
+    calls = {}
+
+    def select(text, *, requested_category, force, scope_id, context=""):
+        calls["select"] = (text, requested_category, force, scope_id)
+        return selected
+
+    async def send(channel, reaction, *, force, scope_id, reply_to):
+        calls["send"] = (channel, reaction, force, scope_id, reply_to)
+        return True
+
+    bot._select_local_reaction = select
+    bot._send_local_reaction = send
+
+    async def run():
+        channel = Channel()
+        message = Message("Mimi, use happy GIF", channel)
+        assert bot.agent.is_candidate(message.content)
+        assert await bot.agent.handle_message(message) is True
+        assert calls["select"][1:] == ("happy", True, channel.id)
+        assert calls["send"][1] == selected
+        assert calls["send"][2] is True
+        assert calls["send"][4] is message
+        assert "Sent a matching local GIF" in message.replies[0][0]
+        assert "send_reaction" in bot._identity_prompt()
+        await bot.close()
+
+    asyncio.run(run())
+
+
 def test_schedule_followup_persists_bounded_task(tmp_path):
     bot = make_bot(tmp_path)
 
